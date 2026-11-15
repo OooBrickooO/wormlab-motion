@@ -1,0 +1,19 @@
+# re_struction/backend/requirements.txt
+# PyTorch 需使用 CUDA 12.8+ 构建（适配 RTX 5070 Ti / Blackwell）：
+# pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+numpy==2.4.6
+scipy==1.17.1
+scikit-image==0.26.0
+opencv-python==4.13.0.92
+ultralytics==8.4.65
+supervision==0.28.0
+PyYAML==6.0.3
+pillow==12.2.0
+fastapi==0.162.0
+uvicorn==0.54.0
+python-socketio==5.16.2
+python-multipart>=0.0.20
+pydantic==2.14.2
+httpx==0.28.1
+pytest>=8.0.0

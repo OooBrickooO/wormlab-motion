@@ -1,0 +1,51 @@
+# 琼脂爬行环境配置 (crawl_agar)
+detection:
+  recovery_confidence: 0.12
+  tile:
+    auto: true
+    size: 640
+    overlap: 0.30
+    infer_imgsz: 416
+    seam_ios_thresh: 0.55
+
+tracking:
+  init_confidence: 0.30
+  suppress_parasite_unconfirmed: true
+  damp_lost_velocity: true
+  recovery:
+    enabled: true
+    roi_size: 416
+    roi_confidence: 0.12
+    bg_sub_enabled: true
+    bg_sample_frames: 20
+    bg_thresholds: [12, 9, 7]
+
+pose:
+  coil_aware_reorient: true
+
+kinematics:
+  k_body: 1.0
+  smooth_s: 0.17
+  gap_max_s: 0.30
+  wave:
+    win_s: 2.5
+    min_valid_frac: 0.5
+    r_min: 0.12
+    eps_min: 0.11
+    post_ratio_min: 0.34
+    amp_post_min: 0.06
+  s_run:
+    enabled: true
+    k_body: 1.15
+    gap_hold_s: 0.90
+    slowdown_hold_s: 4.0
+    min_disp_ratio: 0.18
+    bridge_gap_s: 0.50
+    adaptive_k_body: true
+    eof_tail_frac: 0.68
+  swing:
+    enabled: false
+  turn:
+    enabled: true
+    R_enter: 0.50
+    R_exit: 0.68

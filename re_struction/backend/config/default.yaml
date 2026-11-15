@@ -1,0 +1,137 @@
+paths:
+  models_dir: "models"
+  data_dir: "../data"
+
+server:
+  host: "0.0.0.0"
+  port: 5001
+  cors_origins:
+    - "http://localhost:3001"
+    - "http://localhost:3000"
+  max_upload_mb: 2048
+  allowed_ext:
+    - "mp4"
+    - "avi"
+    - "mov"
+  image_ext:
+    - "jpg"
+    - "jpeg"
+    - "png"
+    - "bmp"
+
+detection:
+  default_model: "origin.pt"
+  model_preference:
+    - "origin.pt"
+    - "OnlineVision.pt"
+    - "CJLUdata_Old.pt"
+    - "CJLUdata.pt"
+    - "best.pt"
+  egg_model: "EggCount.pt"
+  imgsz: 416
+  oom_fallback: true
+  tile:
+    enabled: false
+    size: 1088
+    overlap: 0.2
+  min_confidence: 0.30
+  min_area_ratio: 0.000015
+  max_area_ratio: 0.10
+  nms_iou: 0.3
+  batch_size: 8
+  mask_margin_ratio: 0.25
+
+counting:
+  late_entry_grace_s: 1.0
+  include_late_in_outputs: false
+  c_unit: "cycle"
+
+pipeline:
+  emit_every: 2
+  jpeg_quality: 80
+  frame_queue: 4
+  infer_queue: 6
+  pose_workers: 4
+  sub_video_size: 200
+  image_mode:
+    fps: 12.0
+    repeat_frames: 36
+  pose_every_n_frames: 1
+
+tracking:
+  confirm_hits: 5
+  iou_match_thresh: 0.5
+  iou_secondary: 0.3
+  cost_threshold: 2.0
+  max_speed: 50.0
+  weights:
+    iou: 0.25
+    motion: 0.45
+    direction: 0.15
+    appearance: 0.15
+  overlap_threshold: 0.3
+  persistence_sec: 60.0
+  ghost_overlay_sec: 3.0
+  ghost_reid_max_lost: 90
+  max_lost_sec_legacy: 15.0
+  prediction_confidence: 0.18
+  head_match_radius_px: 120.0
+  stitch:
+    enabled: false
+
+pose:
+  n_dense: 33
+  min_mask_px: 30
+  fragment_ratio: 0.25
+  upscale_below_px: 120
+  upscale_target_px: 240
+  max_upscale: 4.0
+  loop_hole_frac: 0.005
+  center_penalty: 2.0
+  branch_flag_ratio: 0.35
+  smooth_sigma_frac: 0.03
+  endcap: true
+  endcap_gain: 0.9
+  ref_window_s: 2.0
+  min_ref_samples: 10
+  bad_area_hi: 1.35
+  bad_area_lo: 0.55
+  branch_bad_ratio: 0.5
+  suspect_len_lo: 0.75
+  suspect_len_hi: 1.25
+  min_len_over_width: 3.0
+  reorient_gap_s: 1.0
+  mask_refine:
+    enabled: false
+
+kinematics:
+  smooth_s: 0.17
+  gap_max_s: 0.30
+  ref_window_s: 2.0
+  k_body: 1.0
+  wave:
+    win_s: 3.0
+    min_valid_frac: 0.6
+    r_min: 0.25
+    eps_min: 0.40
+    post_ratio_min: 0.35
+    amp_post_min: 0.10
+  s_run:
+    enabled: true
+    dir_lock_rad: 0.8
+    reverse_phase_eps_rad: 0.3
+    reverse_disp_ratio: 0.03
+    min_disp_ratio: 0.10
+    gap_hold_s: 0.30
+  swing:
+    enabled: false
+    bend_high: 0.9
+    min_flip_interval_s: 0.08
+  turn:
+    enabled: true
+    R_enter: 0.55
+    R_exit: 0.72
+    min_dwell_s: 0.2
+    cooldown_s: 2.5
+  static_speed_bls: 0.03
+  static_amp_rad: 0.08

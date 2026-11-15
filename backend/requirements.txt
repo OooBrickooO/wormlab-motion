@@ -1,0 +1,13 @@
+flask
+flask-socketio
+opencv-python
+ultralytics
+supervision
+torch
+scipy
+scikit-image
+numpy
+celery
+redis
+eventlet
+flask-cors
