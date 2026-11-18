@@ -353,8 +353,17 @@ class PassA:
                                     if len(hist) > 25:
                                         del hist[0]
 
-                        # 并行提取活跃目标的中心线姿态
-                        def _extract_one(to: TrackOut) -> Pose | None:
+                        # 并行提取活跃目标的中心线姿态（mask_refine 开启时透传当前帧灰度图）
+                        frame_gray: np.ndarray | None = None
+                        if self.cfg.pose.mask_refine.enabled and frm is not None:
+                            frame_gray = frm if frm.ndim == 2 else cv2.cvtColor(frm, cv2.COLOR_BGR2GRAY)
+
+                        def _extract_one(
+                            to: TrackOut,
+                            frame_gray: np.ndarray | None = frame_gray,
+                            cur_idx: int = cur_idx,
+                            dets: list[Detection] = dets,
+                        ) -> Pose | None:
                             if to.is_ghost or to.det_idx is None or to.det_idx >= len(dets):
                                 return None
                             det = dets[to.det_idx]
@@ -366,7 +375,7 @@ class PassA:
                                 pose_extractors[to.uid] = ext
                             elif to.head_xy is not None and ext.user_head_xy is None and ext.prev_dense is None:
                                 ext.set_user_head_xy(to.head_xy)
-                            return ext.process(det, frame_idx=cur_idx)
+                            return ext.process(det, frame_gray=frame_gray, frame_idx=cur_idx)
 
                         poses = list(pose_pool.map(_extract_one, outs))
 

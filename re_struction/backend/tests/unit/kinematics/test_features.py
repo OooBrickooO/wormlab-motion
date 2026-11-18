@@ -33,13 +33,13 @@ def test_features_straight_line() -> None:
 def test_features_semicircle() -> None:
     cfg = load_config("crawl_agar").kinematics
     s_mid = (np.arange(32) + 0.5) / 32.0
-    # 总转角为 π 的半圆弧，c = mean(后6段) - mean(前6段) = (26/32)*π
+    # 总转角为 π 的半圆弧，混合 cos(πs) 模态与去尖端首尾段差约为 0.65*2 + 0.35*(22/32)*π
     theta = np.pi * (s_mid - 0.5)
     pts = _dense_from_theta(theta, L=120.0)
     f = compute_features(pts, cfg)
     assert f is not None
     assert f.R == pytest.approx(2.0 / np.pi, rel=0.02)
-    assert f.c == pytest.approx(np.pi * (26.0 / 32.0), rel=0.02)
+    assert f.c == pytest.approx(0.65 * 2.0 + 0.35 * np.pi * (22.0 / 32.0), rel=0.02)
 
 
 def test_features_analytic_traveling_wave_sign_invariant() -> None:

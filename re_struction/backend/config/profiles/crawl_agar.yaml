@@ -22,30 +22,38 @@ tracking:
 
 pose:
   coil_aware_reorient: true
+  min_len_over_width: 2.2
 
 kinematics:
-  k_body: 1.0
+  k_body: 1.0                 # 通用单帧特征沿用 1.0；S 计数由 s_run.k_body (1.15) 独立控制
   smooth_s: 0.17
   gap_max_s: 0.30
+  dc_remove_window_s: 0.0     # 关闭动态跳变的 DC 扣除，避免相平面突变
   wave:
-    win_s: 2.5
+    win_s: 1.8                # 从 2.5s 缩短为 1.8s，防止短促单周期被静止帧稀释
     min_valid_frac: 0.5
     r_min: 0.12
-    eps_min: 0.11
-    post_ratio_min: 0.34
+    eps_min: 0.15
+    post_ratio_min: 0.30
     amp_post_min: 0.06
   s_run:
     enabled: true
     k_body: 1.15
+    dir_lock_rad: 0.55        # 从 0.80 降至 0.55
+    reverse_phase_eps_rad: 0.45
     gap_hold_s: 0.90
-    slowdown_hold_s: 4.0
-    min_disp_ratio: 0.18
+    slowdown_hold_s: 3.0
+    min_disp_ratio: 0.08      # 从 0.18 降至 0.08，修复打滑/慢爬 S 周期被 no_disp 误杀
     bridge_gap_s: 0.50
     adaptive_k_body: true
-    eof_tail_frac: 0.68
+    eof_tail_frac: 0.65
   swing:
     enabled: false
   turn:
     enabled: true
-    R_enter: 0.50
-    R_exit: 0.68
+    R_enter: 0.65             # 从 0.50 提至 0.65（对应 ~165° C 弯，原 0.50 要求 >217° 死弯）
+    R_exit: 0.78              # 从 0.68 提至 0.78
+    min_dwell_s: 0.15
+    cooldown_s: 0.45
+    max_curl_s: 2.0
+    min_peak_c_rad: 0.85

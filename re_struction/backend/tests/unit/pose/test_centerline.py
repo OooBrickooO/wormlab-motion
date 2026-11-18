@@ -94,9 +94,9 @@ def test_omega_self_touch_loop_flag() -> None:
 
 def test_tiny_mask_and_upscaled_flag() -> None:
     cfg = load_config("swim_liquid").pose
-    # 空掩码 / 小于 30px
+    # 空掩码 / 小于 min_mask_px (15px)
     tiny = np.zeros((30, 30), dtype=bool)
-    tiny[10:13, 10:15] = True
+    tiny[10:13, 10:14] = True
     p_tiny = extract_pose(tiny, (0, 0), cfg)
     assert p_tiny.dense is None
     assert p_tiny.quality == Quality.MISSING

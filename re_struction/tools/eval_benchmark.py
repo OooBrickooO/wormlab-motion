@@ -28,7 +28,7 @@ from tools.make_synthetic import Scn, make_series  # noqa: E402
 from wormlab.config import Config, load_config  # noqa: E402
 from wormlab.geometry import iou_xyxy  # noqa: E402
 from wormlab.kinematics import KinematicsEngine  # noqa: E402
-from wormlab.pose.orientation import reorient_track_poses  # noqa: E402
+from wormlab.pose.orientation import reorient_track_poses, reorient_track_poses_coil_aware  # noqa: E402
 from wormlab.schemas import Pose, Quality  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -214,6 +214,7 @@ def evaluate_real_videos(
 
         # 对每个初始虫主实例 (counted=True 且每 track_id 最优 uid) 运行 KinematicsEngine
         reports_by_uid: dict[int, Any] = {}
+        coil_aware = bool(getattr(cfg.pose, "coil_aware_reorient", False) and cfg.kinematics.s_run.enabled)
         for grp in selected_by_tid.values():
             if not grp.counted:
                 continue
@@ -221,8 +222,18 @@ def evaluate_real_videos(
             for r in grp.records:
                 if 0 <= r.frame_idx < total_frames and not r.is_ghost:
                     poses_seq[r.frame_idx] = r.pose
-            poses_seq = reorient_track_poses(poses_seq)
-            rep, _ = KinematicsEngine.run(
+            # 与 PassB.run() 生产管线对齐：卷曲感知头尾重排 + run_postprocessed（桥接/自适应k/尾数结算）
+            has_manual_head = bool(getattr(grp, "head_kpt_idx", None) is not None)
+            if coil_aware:
+                poses_seq = reorient_track_poses_coil_aware(
+                    poses_seq,
+                    cfg=cfg.kinematics,
+                    fps=fps,
+                    preserve_first_head=has_manual_head,
+                )
+            else:
+                poses_seq = reorient_track_poses(poses_seq)
+            rep, _ = KinematicsEngine.run_postprocessed(
                 poses_seq,
                 fps=fps,
                 cfg=cfg.kinematics,

@@ -57,8 +57,10 @@ class KinematicsEngine:
         self._s_feats: list[Feat | None] = []
         self._s_raw_a: list[tuple[float, float] | None] = []
         self._next_feat_idx: int = 0
-        self._dc_win_frames = max(20, int(round(5.0 * self.fps)))
-        self._dc_min_samples = max(15, int(round(2.5 * self.fps)))
+        dc_win_s = float(getattr(cfg, "dc_remove_window_s", 5.0))
+        self._dc_enabled = dc_win_s > 0.0
+        self._dc_win_frames = max(20, int(round(max(dc_win_s, 0.0) * self.fps)))
+        self._dc_min_samples = max(15, int(round(0.5 * max(dc_win_s, 0.0) * self.fps)))
 
         # 阶段 2: 门限 + 计数器步进
         self.s = SRunCounter(cfg.s_run, fps=self.fps)
@@ -69,6 +71,8 @@ class KinematicsEngine:
         self._slowdown_hold_frames = max(self.gap_hold_frames, int(round(slow_hold_s * self.fps)))
         self._occ_run: int = 0
         self._pause_run: int = 0
+        # R <= 0.52 视为真正深度盘绕自交（约 > 200° 均匀弧），此时才作废 S 未完成周期
+        self._deep_coil_R: float = 0.52
         self.per_frame: list[PerFrame] = []
         self.eps_history: list[float] = []
         self._next_step_idx: int = 0
@@ -139,7 +143,7 @@ class KinematicsEngine:
         self._s_raw_a.append((raw_a1, raw_a2))
 
         lo = max(0, len(self._s_raw_a) - self._dc_win_frames)
-        vals = [p for p in self._s_raw_a[lo:] if p is not None]
+        vals = [p for p in self._s_raw_a[lo:] if p is not None] if self._dc_enabled else []
         if len(vals) >= self._dc_min_samples:
             arr = np.asarray(vals, dtype=np.float64)
             m1, m2 = float(np.median(arr[:, 0])), float(np.median(arr[:, 1]))
@@ -200,16 +204,26 @@ class KinematicsEngine:
         L_ref = self._L_ref(i)
 
         if self.cfg.turn.enabled:
-            self.turn.step(i, feat.R if feat is not None else 0.0, valid=(feat is not None))
+            self.turn.step(
+                i,
+                feat.R if feat is not None else 0.0,
+                valid=(feat is not None),
+                c_val=(feat.c if feat is not None else None),
+            )
 
         if self.cfg.s_run.enabled:
-            if self.turn.in_curl:
+            deep_coil = feat is not None and float(feat.R) <= self._deep_coil_R
+            if self.turn.in_curl and deep_coil:
+                # 真正深度盘绕自交：驻留超过 min_dwell 才作废未完成周期，否则仅冻结
                 if (i - self.turn.curl_start) >= self.turn.min_dwell_frames:
                     self.s.force_abort("curl_or_bad")
                     self._occ_run = 0
                     self._pause_run = 0
                 else:
                     self.s.freeze()
+            elif self.turn.in_curl and self.turn.peak_c_in_curl >= self.turn.min_peak_c_rad:
+                # 中等 C 弯进行中：冻结 S 相位但不清零已累积进度
+                self.s.freeze()
             elif s_feat is None:
                 self._occ_run += 1
                 if self._occ_run > self._occ_hold_frames:
@@ -221,6 +235,10 @@ class KinematicsEngine:
                 self._occ_run = 0
                 self._pause_run += 1
                 if self._pause_run > self._slowdown_hold_frames:
+                    # 中途停顿：先按 eof_tail_frac 结算未满 2π 的尾数周期，再中止
+                    tail_frac = getattr(self.cfg.s_run, "eof_tail_frac", None)
+                    if tail_frac is not None and self.s.active:
+                        self.s.settle_partial(i, L_ref, tail_frac=float(tail_frac))
                     self.s.force_abort("gate_lost")
                 else:
                     self.s.freeze()
@@ -238,7 +256,12 @@ class KinematicsEngine:
                 )
 
         if self.cfg.swing.enabled:
-            self.swing.step(i, feat.c if feat is not None else 0.0, valid=(feat is not None))
+            self.swing.step(
+                i,
+                feat.c if feat is not None else 0.0,
+                valid=(feat is not None),
+                u_curr=(feat.u if feat is not None else None),
+            )
 
         speed_bls = self._speed_bls(i, L_ref)
         beh = classify_behavior(
@@ -389,6 +412,13 @@ class KinematicsEngine:
             self._step_frame(self._next_step_idx)
             self._next_step_idx += 1
 
+        # 文末 (EOF) 尾数结算：未完成的正向周期达 eof_tail_frac 且位移按比例达标时补计 1 次
+        tail_frac = getattr(self.cfg.s_run, "eof_tail_frac", None)
+        if self.cfg.s_run.enabled and tail_frac is not None and self.s.active and self.per_frame:
+            last_i = n_feats - 1
+            if self.s.settle_partial(last_i, self._L_ref(last_i), tail_frac=float(tail_frac)):
+                self.per_frame[-1] = replace(self.per_frame[-1], s_count=self.s.s_count)
+
         c_cyc = self.swing.cycles
         c_bnd = self.swing.bends
         c_trn = self.turn.count
@@ -507,30 +537,5 @@ class KinematicsEngine:
                 rep, pfs = eng.finalize()
                 valid_feats = [f for f in eng.feats if f is not None]
 
-        tail_frac = getattr(cfg.s_run, "eof_tail_frac", None)
-        if tail_frac is not None and eng.s.active and eng.s.direction > 0 and valid_feats:
-            part = (eng.s.prog - eng.s.anchor_prog) / (2.0 * math.pi)
-            if part >= float(tail_frac):
-                last_f = next((f for f in reversed(eng.feats) if f is not None), None)
-                if last_f is not None:
-                    ax = eng.s._unit(eng.s.axis_sum)
-                    p_tail = float(np.dot(last_f.center - eng.s.anchor_center, ax))
-                    l_m = float(np.median([f.L for f in valid_feats]))
-                    if p_tail >= float(eng.cfg.s_run.min_disp_ratio) * l_m:
-                        new_s = int(rep.s_count) + 1
-                        obs_sec = max(1e-3, float(rep.observed_seconds))
-                        c_tot = int(rep.c_count)
-                        new_freq_s = float(new_s) / obs_sec
-                        new_avg_leg = float(new_s + c_tot) / obs_sec
-                        rep = replace(
-                            rep,
-                            s_count=new_s,
-                            freq_s_hz=round(new_freq_s, 4),
-                            avg_freq_legacy=round(new_avg_leg, 4),
-                            motion_type_legacy=behavior_to_legacy_motion_type(Behavior.CRAWL),
-                        )
-                        if pfs:
-                            pfs = list(pfs)
-                            pfs[-1] = replace(pfs[-1], s_count=new_s)
-
+        # 文末尾数补全已统一由 finalize() 内的 SRunCounter.settle_partial() 完成（与中途停顿结算同一口径）
         return rep, pfs

@@ -41,12 +41,29 @@ def project_trig_modes(th: np.ndarray, k_body: float = 1.0) -> tuple[float, floa
 
 
 def compute_total_turn_c(theta: np.ndarray) -> float:
-    """计算首尾 20% 段切线角之差 c(t) = mean(theta[-m:]) - mean(theta[:m]) (rad)。"""
-    n = len(theta)
+    """计算鲁棒 C 弯曲模态 c(t) (rad)。
+
+    结合全躯干 cos(πs) 对称模态（等价于对曲率按 sin(πs) 加权积分，中心权重最大、两端为 0）
+    与去尖端（避开首尾约 6% 端帽噪声点）的首尾 20% 段切线角差，消除掩码两端圆帽毛刺。
+    均匀圆弧下两项与原 "尾 20% − 头 20%" 定义同号同量纲。
+    """
+    th_arr = np.asarray(theta, dtype=np.float64)
+    n = len(th_arr)
     if n < 2:
         return 0.0
-    m = max(1, int(round(0.2 * n)))
-    return float(np.mean(theta[-m:]) - np.mean(theta[:m]))
+    if n < 4:
+        return float(th_arr[-1] - th_arr[0])
+    th_zero = th_arr - float(np.mean(th_arr))
+    s_mid = (np.arange(n, dtype=np.float64) + 0.5) / float(n)
+    # 均匀圆弧 θ = Δθ·s 时，−π·mean(θ̃·cos(πs)) = 2Δθ/π ≈ 0.64·Δθ（端段差项 ≈ 0.68·Δθ），两者同号同量纲
+    c_cos = float(-np.pi * np.mean(th_zero * np.cos(np.pi * s_mid)))
+
+    pad = max(1, int(round(0.06 * n)))
+    m = max(1, int(round(0.20 * n)))
+    head_seg = th_arr[pad : pad + m]
+    tail_seg = th_arr[max(pad, n - pad - m) : n - pad]
+    c_end = float(np.mean(tail_seg) - np.mean(head_seg))
+    return 0.65 * c_cos + 0.35 * c_end
 
 
 def modal_phase(a1: float, a2: float) -> float:

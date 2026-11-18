@@ -99,7 +99,7 @@ pose:
   branch_bad_ratio: 0.5
   suspect_len_lo: 0.75
   suspect_len_hi: 1.25
-  min_len_over_width: 3.0
+  min_len_over_width: 2.2
   reorient_gap_s: 1.0
   mask_refine:
     enabled: false
@@ -133,5 +133,8 @@ kinematics:
     R_exit: 0.72
     min_dwell_s: 0.2
     cooldown_s: 2.5
+    max_curl_s: 2.0
+    min_peak_c_rad: 0.85
+  dc_remove_window_s: 5.0
   static_speed_bls: 0.03
   static_amp_rad: 0.08

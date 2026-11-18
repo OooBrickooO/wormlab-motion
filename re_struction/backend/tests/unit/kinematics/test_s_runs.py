@@ -122,3 +122,22 @@ def test_s_run_all_synthetic_scenarios(fps: float) -> None:
     c_gap_long = _run_s_counter_on_dense(d_fwd, fps, missing_slice=(mid_idx, mid_idx + gap_long))
     assert c_gap_long.s_count <= 10
     assert c_gap_long.aborted >= 1
+
+
+def test_s_run_mid_pause_settle_partial() -> None:
+    cfg = load_config("crawl_agar").kinematics.s_run
+    fps = 30.0
+    counter = SRunCounter(cfg, fps=fps)
+    u = np.array([1.0, 0.0], dtype=np.float32)
+    L_ref = 100.0
+    # 模拟推进 0.85 个周期（5.34 rad）后停顿，顺向推进 12px (> 0.08 * 0.65 * 100 = 5.2px)
+    n_steps = 40
+    for i in range(n_steps):
+        phi = -np.pi + (i / (n_steps - 1)) * (1.7 * np.pi)
+        phi_wrapped = float(np.arctan2(np.sin(phi), np.cos(phi)))
+        center = np.array([12.0 * i / (n_steps - 1), 0.0], dtype=np.float32)
+        counter.step(i=i, gate_ok=True, phi=phi_wrapped, center=center, u=u, L_ref=L_ref)
+    assert counter.s_count == 0
+    settled = counter.settle_partial(n_steps, L_ref=L_ref, tail_frac=0.65)
+    assert settled is True
+    assert counter.s_count == 1

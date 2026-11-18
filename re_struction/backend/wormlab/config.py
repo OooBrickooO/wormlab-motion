@@ -152,7 +152,7 @@ class PoseCfg:
     branch_bad_ratio: float = 0.5
     suspect_len_lo: float = 0.75
     suspect_len_hi: float = 1.25
-    min_len_over_width: float = 3.0
+    min_len_over_width: float = 2.2  # 原 quality.py 等效 3.0，放宽以兼容 C 形弯曲与低倍镜小虫
     reorient_gap_s: float = 1.0
     coil_aware_reorient: bool = False
     mask_refine: MaskRefineCfg = field(default_factory=MaskRefineCfg)
@@ -197,6 +197,8 @@ class TurnCfg:
     R_exit: float = 0.72
     min_dwell_s: float = 0.2
     cooldown_s: float = 2.5
+    max_curl_s: float = 2.0  # CURL 状态最大驻留秒数，超时自动释放回 EXT，防止永久锁死 S 计数
+    min_peak_c_rad: float = 0.85  # CURL 期间需至少达到的 |c| 弯曲度，区分真实 C 弯与掩码残缺缩短
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ class KinCfg:
     gap_max_s: float = 0.30
     ref_window_s: float = 2.0
     k_body: float = 1.0
+    dc_remove_window_s: float = 5.0  # S 波模态慢时变 DC 扣除窗口 (s)；<= 0 关闭
     wave: WaveCfg = field(default_factory=WaveCfg)
     s_run: SRunCfg = field(default_factory=SRunCfg)
     swing: SwingCfg = field(default_factory=SwingCfg)

@@ -129,45 +129,53 @@ def reorient_track_poses_coil_aware(
         s_start = 0 if si == 0 else (segs[si - 1][-1] + idxs[0]) // 2 + 1
         s_end = n if si == len(segs) - 1 else (idxs[-1] + segs[si + 1][0]) // 2 + 1
         sub_re = reorient_track_poses(list(poses[s_start:s_end]), margin=margin)
-        if not (preserve_first_head and si == 0):
-            rel_local = [
-                i - s_start
-                for i in idxs
-                if sub_re[i - s_start] is not None and sub_re[i - s_start].quality != Quality.BAD
-            ]
-            if len(rel_local) >= 4:
-                lengths = [float(sub_re[k].length) for k in rel_local if float(sub_re[k].length) > 1.0]
-                l_med = float(np.median(lengths)) if lengths else 100.0
-                net_fwd = 0.0
-                for j in range(1, len(rel_local)):
-                    p0, p1 = sub_re[rel_local[j - 1]], sub_re[rel_local[j]]
-                    u0 = p0.dense[0] - p0.dense[-1]
-                    un = float(np.linalg.norm(u0))
-                    if un > 1e-6:
-                        net_fwd += float(np.dot(p1.dense.mean(axis=0) - p0.dense.mean(axis=0), u0 / un))
+        # preserve_first_head：首段默认信任人工/首帧头标；但若首段呈现典型"正向爬行但头尾标反"
+        # （无任何计入的 S 周期、存在 backward 拒绝且综合得分显著为负），仍允许自动翻转纠正
+        locked_head = bool(preserve_first_head and si == 0)
+        rel_local = [
+            i - s_start
+            for i in idxs
+            if sub_re[i - s_start] is not None and sub_re[i - s_start].quality != Quality.BAD
+        ]
+        if len(rel_local) >= 4:
+            lengths = [float(sub_re[k].length) for k in rel_local if float(sub_re[k].length) > 1.0]
+            l_med = float(np.median(lengths)) if lengths else 100.0
+            net_fwd = 0.0
+            for j in range(1, len(rel_local)):
+                p0, p1 = sub_re[rel_local[j - 1]], sub_re[rel_local[j]]
+                u0 = p0.dense[0] - p0.dense[-1]
+                un = float(np.linalg.norm(u0))
+                if un > 1e-6:
+                    net_fwd += float(np.dot(p1.dense.mean(axis=0) - p0.dense.mean(axis=0), u0 / un))
 
-                eng_s = KinematicsEngine(cfg=cfg, fps=fps)
-                for k in rel_local:
-                    eng_s.push(k, sub_re[k])
-                eng_s.finalize()
+            eng_s = KinematicsEngine(cfg=cfg, fps=fps)
+            for k in rel_local:
+                eng_s.push(k, sub_re[k])
+            eng_s.finalize()
 
-                dphi_tot = 0.0
-                prev_ph: float | None = None
-                for feat in eng_s.feats:
-                    if feat is None:
-                        prev_ph = None
-                        continue
-                    ph = modal_phase(*project_trig_modes(feat.th, k_body=s_k))
-                    if prev_ph is not None:
-                        dphi_tot += float(wrap_pi(ph - prev_ph))
-                    prev_ph = ph
+            dphi_tot = 0.0
+            prev_ph: float | None = None
+            for feat in eng_s.feats:
+                if feat is None:
+                    prev_ph = None
+                    continue
+                ph = modal_phase(*project_trig_modes(feat.th, k_body=s_k))
+                if prev_ph is not None:
+                    dphi_tot += float(wrap_pi(ph - prev_ph))
+                prev_ph = ph
 
-                score = (net_fwd / max(1.0, l_med)) + 0.35 * (dphi_tot / (2.0 * math.pi))
-                if score < 0.0:
-                    sub_re = [
-                        None if (p is None or getattr(p, "dense", None) is None) else replace(p, dense=p.dense[::-1].copy())
-                        for p in sub_re
-                    ]
+            score = (net_fwd / max(1.0, l_med)) + 0.35 * (dphi_tot / (2.0 * math.pi))
+            if locked_head:
+                do_flip = bool(
+                    eng_s.s.s_count == 0 and int(eng_s.s.rejected.get("backward", 0)) >= 1 and score < -0.25
+                )
+            else:
+                do_flip = score < 0.0
+            if do_flip:
+                sub_re = [
+                    None if (p is None or getattr(p, "dense", None) is None) else replace(p, dense=p.dense[::-1].copy())
+                    for p in sub_re
+                ]
 
         for k, p in enumerate(sub_re):
             out[s_start + k] = p

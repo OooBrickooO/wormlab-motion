@@ -95,3 +95,13 @@ def test_reorient_coil_aware_flip_invariance_and_bridge_gaps() -> None:
     bridged = bridge_short_pose_gaps(gapped, fps=fps, max_gap_s=0.50)
     for k in range(30, 36):
         assert bridged[k] is not None and bridged[k].quality == Quality.SUSPECT
+
+    # preserve_first_head=True 时，若整条首段全部反向（s_count==0 且 backward>=1 且 score<-0.25）仍应自动纠偏
+    rev_poses = [
+        None if p is None else replace(p, dense=p.dense[::-1].copy())
+        for p in poses[:105]
+    ]
+    fixed_rev = reorient_track_poses_coil_aware(rev_poses, fps=fps, cfg=cfg, preserve_first_head=True)
+    d_true_u = dense_seq[20][0] - dense_seq[20][-1]
+    d_fix_u = fixed_rev[20].dense[0] - fixed_rev[20].dense[-1]
+    assert float(np.dot(d_true_u, d_fix_u)) > 0.0

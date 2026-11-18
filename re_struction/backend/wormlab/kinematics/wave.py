@@ -44,7 +44,9 @@ def wave_gate(
         return GateResult.off()
 
     A = np.array([[f.a1, f.a2] for f in valid_feats], dtype=np.float64)
-    r_med = float(np.median(np.hypot(A[:, 0], A[:, 1])))
+    r_all = np.hypot(A[:, 0], A[:, 1])
+    # 兼顾中位数与窗口内前 35% 活跃帧波幅，防止短促 S 波进出滑窗时被前后静止帧稀释掐断
+    r_med = max(float(np.median(r_all)), 0.85 * float(np.percentile(r_all, 65)))
 
     cov = np.cov(A.T)
     ev = np.linalg.eigvalsh(cov)

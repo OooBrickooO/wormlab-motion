@@ -1,13 +1,37 @@
-# 液体游泳环境配置 (swim_liquid)
+# 液体游泳环境配置 (swim_liquid) —— C 运动计数主场景
+detection:
+  min_confidence: 0.20
+  recovery_confidence: 0.10
+  tile:
+    auto: true
+    size: 640
+    overlap: 0.25
+    infer_imgsz: 640
+
+tracking:
+  damp_lost_velocity: true
+  recovery:
+    enabled: true
+    roi_size: 416
+    roi_confidence: 0.10
+    bg_sub_enabled: true
+    bg_sample_frames: 25
+    bg_thresholds: [12, 8, 5]
+
+pose:
+  min_mask_px: 15
+  min_len_over_width: 1.8
+  upscale_below_px: 120
+
 kinematics:
   smooth_s: 0.07
+  wave:
+    win_s: 1.0
   s_run:
     enabled: false
   turn:
     enabled: false
   swing:
     enabled: true
-    bend_high: 0.9
+    bend_high: 0.75
     min_flip_interval_s: 0.08
-  wave:
-    win_s: 1.0

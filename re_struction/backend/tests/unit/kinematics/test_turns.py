@@ -32,7 +32,7 @@ def test_turn_counter_hysteresis_and_cooldown() -> None:
     for i in range(10):
         tc2.step(i, 0.90, valid=True)
     for i in range(10, 20):
-        tc2.step(i, 0.65, valid=True)
+        tc2.step(i, 0.72, valid=True)
     for i in range(20, 30):
         tc2.step(i, 0.90, valid=True)
     assert tc2.count == 0
@@ -44,3 +44,27 @@ def test_turn_counter_hysteresis_and_cooldown() -> None:
     for i in range(10, 20):
         tc_init.step(i, 0.90, valid=True)
     assert tc_init.count == 0
+
+
+def test_turn_counter_timeout_release_and_min_peak_c() -> None:
+    cfg = load_config("crawl_agar").kinematics.turn
+    fps = 10.0
+
+    # 1. CURL 超时自动释放，防止永久锁死下游 S 计数
+    tc_to = TurnCounter(cfg, fps=fps)
+    for i in range(10):
+        tc_to.step(i, 0.90, valid=True, c_val=0.1)
+    for i in range(10, 10 + tc_to.max_curl_frames + 3):
+        tc_to.step(i, 0.58, valid=True, c_val=1.6)
+    assert tc_to.in_curl is False
+    assert tc_to.count == 1
+
+    # 2. 传入 c_val 但 |c| 未达 min_peak_c_rad（如掩码缺角导致 R 下降）时不计为有效弯
+    tc_low_c = TurnCounter(cfg, fps=fps)
+    for i in range(10):
+        tc_low_c.step(i, 0.90, valid=True, c_val=0.1)
+    for i in range(10, 16):
+        tc_low_c.step(i, 0.55, valid=True, c_val=0.3)
+    for i in range(16, 25):
+        tc_low_c.step(i, 0.90, valid=True, c_val=0.1)
+    assert tc_low_c.count == 0

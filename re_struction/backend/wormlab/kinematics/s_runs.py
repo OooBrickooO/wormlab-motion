@@ -42,6 +42,7 @@ class SRunCounter:
         self.anchor_prog: float = 0.0
         self.anchor_center: np.ndarray = np.zeros(2, dtype=np.float64)
         self.axis_sum: np.ndarray = np.zeros(2, dtype=np.float64)
+        self.last_center: np.ndarray | None = None
         self.gap: int = 0
 
         self.s_count: int = 0
@@ -56,6 +57,7 @@ class SRunCounter:
         self.phi_prev = float(phi)
         self.anchor_prog = 0.0
         self.anchor_center = np.asarray(center, dtype=np.float64).copy()
+        self.last_center = self.anchor_center.copy()
         self.axis_sum = np.zeros(2, dtype=np.float64)
         self.gap = 0
 
@@ -77,6 +79,29 @@ class SRunCounter:
         """短暂掉门限或遮挡期间冻结进度而不清零，待恢复后重新对齐相位。"""
         if self.active and self.gap < 1:
             self.gap = 1
+
+    def settle_partial(self, i: int, L_ref: float, tail_frac: float = 0.65) -> bool:
+        """
+        当一次正向爬行因停顿 (gate_lost) 或视频结束 (EOF) 终止时，
+        若当前未完成周期已累积 >= tail_frac * 2π（如 65% 周期）且顺向推进位移按比例达标，
+        则结算为 +1 次有效 S 周期，避免 1.7~1.9 周期被硬截断为 1。
+        """
+        if not self.active or self.direction <= 0 or self.last_center is None:
+            return False
+        rem_frac = (self.prog - self.anchor_prog) / (2.0 * np.pi)
+        if rem_frac < float(tail_frac):
+            return False
+        axis_cur = self._unit(self.axis_sum)
+        p_cur = float(np.dot(self.last_center - self.anchor_center, axis_cur))
+        req_disp = float(self.cfg.min_disp_ratio) * float(tail_frac) * float(L_ref)
+        if p_cur >= req_disp:
+            self.s_count += 1
+            self.events.append(SEvent(frame_idx=int(i), direction=+1, disp_px=p_cur, reason="tail_settled"))
+            self.anchor_prog += 2.0 * np.pi
+            self.anchor_center = self.last_center.copy()
+            self.axis_sum = np.zeros(2, dtype=np.float64)
+            return True
+        return False
 
     @staticmethod
     def _unit(v: np.ndarray) -> np.ndarray:
@@ -111,6 +136,7 @@ class SRunCounter:
         dphi = float(wrap_pi(float(phi) - self.phi_prev))
         self.phi_prev = float(phi)
         self.axis_sum = self.axis_sum + np.asarray(u, dtype=np.float64)
+        self.last_center = np.asarray(center, dtype=np.float64).copy()
 
         if self.direction == 0:
             self.prog += dphi

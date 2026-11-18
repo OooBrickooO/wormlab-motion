@@ -40,6 +40,6 @@ def test_quality_judge_merge_and_bend_suspect() -> None:
     assert p_bend.quality == Quality.SUSPECT
     assert p_bend.dense is not None
 
-    # 圆球碎片 (length < 3 * width) -> 判为 BAD
-    p_blob = judge.judge(_dummy_pose(length=18.0, width=8.0, area=800.0))
+    # 圆球碎片 (length < min_len_over_width * width) -> 判为 BAD
+    p_blob = judge.judge(_dummy_pose(length=16.0, width=8.0, area=800.0))
     assert p_blob.quality == Quality.BAD

@@ -43,3 +43,27 @@ def test_swing_counter_bends_and_cycles() -> None:
     sc_seq.step(20, 1.2, valid=True)
     assert sc_seq.bends == 3
     assert sc_seq.cycles == 1
+
+
+def test_swing_flip_immunity_and_biased_prominence() -> None:
+    cfg = load_config("swim_liquid").kinematics.swing
+    fps = 30.0
+
+    # 1. 头尾单帧 180° 翻转免疫：连续同侧弯曲期间某帧 u 反向且 c 变号 -> 不产生假翻转计数
+    sc_flip = SwingCounter(cfg, fps=fps)
+    u_fwd = np.array([1.0, 0.0], dtype=np.float32)
+    u_rev = np.array([-1.0, 0.0], dtype=np.float32)
+    for i in range(12):
+        if i in (4, 8):
+            sc_flip.step(i, -1.2, valid=True, u_curr=u_rev)
+        else:
+            sc_flip.step(i, 1.2, valid=True, u_curr=u_fwd)
+    assert sc_flip.bends == 1
+
+    # 2. 姿态偏置下的峰谷突出度计数：+0.45 + 0.85 * sin(2π * 2t) 范围 [-0.40, +1.30]
+    t = np.arange(int(5.0 * fps)) / fps
+    biased = 0.45 + 0.85 * np.sin(2.0 * np.pi * 2.0 * t)
+    sc_bias = SwingCounter(cfg, fps=fps)
+    for i, val in enumerate(biased):
+        sc_bias.step(i, float(val), valid=True)
+    assert sc_bias.cycles >= 8

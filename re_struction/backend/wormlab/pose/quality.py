@@ -24,6 +24,7 @@ class PoseQualityJudge:
         win_frames = max(1, int(round(float(cfg.ref_window_s) * float(fps))))
         self.area_hist: deque[float] = deque(maxlen=win_frames)
         self.len_hist: deque[float] = deque(maxlen=win_frames)
+        self.min_len_over_width = float(getattr(cfg, "min_len_over_width", 2.2))
 
     def judge(self, pose: Pose) -> Pose:
         if pose.dense is None:
@@ -52,7 +53,7 @@ class PoseQualityJudge:
         if "branch" in flags and float(pose.branch_ratio) > float(self.cfg.branch_bad_ratio):
             bad = True
 
-        if float(pose.length) < float(self.cfg.min_len_over_width) * max(1.0, float(pose.width)):
+        if float(pose.length) < self.min_len_over_width * max(1e-6, float(pose.width)):
             bad = True
 
         if flags & {"loop", "fragment", "fallback"}:
