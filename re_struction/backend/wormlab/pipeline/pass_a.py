@@ -585,7 +585,7 @@ def run_pass_a(
     job = JobSpec(
         task_id=Path(cache_dir).name,
         video_path=str(video_path),
-        profile="crawl_agar",
+        profile=cfg.profile,
         c_unit=cfg.counting.c_unit,
         worm_count=max_worm_id,
         head_config=head_config or [],

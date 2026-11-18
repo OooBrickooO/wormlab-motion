@@ -27,12 +27,12 @@ def test_turn_counter_hysteresis_and_cooldown() -> None:
 
     assert tc.count == 3
 
-    # 只降到 0.65 (> R_enter=0.55) -> 不触发
+    # 只降到 0.65 (> R_enter=0.58) -> 不触发
     tc2 = TurnCounter(cfg, fps=fps)
     for i in range(10):
         tc2.step(i, 0.90, valid=True)
     for i in range(10, 20):
-        tc2.step(i, 0.72, valid=True)
+        tc2.step(i, 0.65, valid=True)
     for i in range(20, 30):
         tc2.step(i, 0.90, valid=True)
     assert tc2.count == 0

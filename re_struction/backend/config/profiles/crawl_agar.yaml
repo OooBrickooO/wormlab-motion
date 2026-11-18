@@ -51,8 +51,8 @@ kinematics:
     enabled: false
   turn:
     enabled: true
-    R_enter: 0.65             # 从 0.50 提至 0.65（对应 ~165° C 弯，原 0.50 要求 >217° 死弯）
-    R_exit: 0.78              # 从 0.68 提至 0.78
+    R_enter: 0.58
+    R_exit: 0.72
     min_dwell_s: 0.15
     cooldown_s: 0.45
     max_curl_s: 2.0

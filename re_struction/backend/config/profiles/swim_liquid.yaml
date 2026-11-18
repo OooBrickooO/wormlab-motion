@@ -1,12 +1,12 @@
 # 液体游泳环境配置 (swim_liquid) —— C 运动计数主场景
 detection:
-  min_confidence: 0.20
+  min_confidence: 0.186
   recovery_confidence: 0.10
   tile:
     auto: true
     size: 640
     overlap: 0.25
-    infer_imgsz: 640
+    infer_imgsz: 416
 
 tracking:
   damp_lost_velocity: true

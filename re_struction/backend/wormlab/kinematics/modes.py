@@ -55,8 +55,8 @@ def compute_total_turn_c(theta: np.ndarray) -> float:
         return float(th_arr[-1] - th_arr[0])
     th_zero = th_arr - float(np.mean(th_arr))
     s_mid = (np.arange(n, dtype=np.float64) + 0.5) / float(n)
-    # 均匀圆弧 θ = Δθ·s 时，−π·mean(θ̃·cos(πs)) = 2Δθ/π ≈ 0.64·Δθ（端段差项 ≈ 0.68·Δθ），两者同号同量纲
-    c_cos = float(-np.pi * np.mean(th_zero * np.cos(np.pi * s_mid)))
+    # 均匀圆弧 θ = Δθ·s 时，−1.25·π·mean(θ̃·cos(πs)) = 2.5Δθ/π ≈ 0.80·Δθ，与原 0.80·Δθ 量纲严格 1:1 对齐
+    c_cos = float(-1.25 * np.pi * np.mean(th_zero * np.cos(np.pi * s_mid)))
 
     pad = max(1, int(round(0.06 * n)))
     m = max(1, int(round(0.20 * n)))

@@ -221,9 +221,6 @@ class KinematicsEngine:
                     self._pause_run = 0
                 else:
                     self.s.freeze()
-            elif self.turn.in_curl and self.turn.peak_c_in_curl >= self.turn.min_peak_c_rad:
-                # 中等 C 弯进行中：冻结 S 相位但不清零已累积进度
-                self.s.freeze()
             elif s_feat is None:
                 self._occ_run += 1
                 if self._occ_run > self._occ_hold_frames:
