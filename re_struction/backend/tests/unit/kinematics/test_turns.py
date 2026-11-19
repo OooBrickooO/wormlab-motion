@@ -1,6 +1,8 @@
 """T14 单测：验证 TurnCounter 迟滞深弯计数。"""
 from __future__ import annotations
 
+import pytest
+
 from wormlab.config import load_config
 from wormlab.kinematics.turns import TurnCounter
 
@@ -68,3 +70,34 @@ def test_turn_counter_timeout_release_and_min_peak_c() -> None:
     for i in range(16, 25):
         tc_low_c.step(i, 0.90, valid=True, c_val=0.1)
     assert tc_low_c.count == 0
+
+
+def test_turn_counter_semicircle_c_bend() -> None:
+    """08_SPEC C1: 180° 半圆 C 形（R=0.64, c=2.5 rad）经 R_c_enter/c_enter_rad 联合判定准确触发；
+    直虫掩码缺角（R=0.64 但 c=0.3 rad）不误计。"""
+    cfg = load_config("crawl_agar").kinematics.turn
+    assert cfg.R_c_enter == pytest.approx(0.75)
+    assert cfg.c_enter_rad == pytest.approx(1.65)
+    fps = 10.0
+
+    # 1. 标准 C 形弯：R=0.64 > R_enter=0.58（非深 Ω 弯），但 |c|=2.5 >= c_enter_rad=1.65 -> 触发
+    tc = TurnCounter(cfg, fps=fps)
+    for i in range(10):
+        tc.step(i, 0.90, valid=True, c_val=0.1)
+    for i in range(10, 16):
+        tc.step(i, 0.64, valid=True, c_val=2.5)
+        assert tc.in_curl is True
+    for i in range(16, 26):
+        tc.step(i, 0.90, valid=True, c_val=0.1)
+    assert tc.count == 1
+
+    # 2. 直虫掩码缺角：R=0.64 但 |c|=0.3 -> 既非深弯也非 C 形弯 -> 输出 0
+    tc2 = TurnCounter(cfg, fps=fps)
+    for i in range(10):
+        tc2.step(i, 0.90, valid=True, c_val=0.1)
+    for i in range(10, 16):
+        tc2.step(i, 0.64, valid=True, c_val=0.3)
+        assert tc2.in_curl is False
+    for i in range(16, 26):
+        tc2.step(i, 0.90, valid=True, c_val=0.1)
+    assert tc2.count == 0

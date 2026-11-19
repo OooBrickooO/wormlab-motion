@@ -1,6 +1,8 @@
 """T13 单测：对照 proto_kinematics.py 在 30 fps 与 10 fps 下覆盖全部 12 类合成场景。"""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import sys
 from pathlib import Path
 
@@ -141,3 +143,77 @@ def test_s_run_mid_pause_settle_partial() -> None:
     settled = counter.settle_partial(n_steps, L_ref=L_ref, tail_frac=0.65)
     assert settled is True
     assert counter.s_count == 1
+
+
+def test_s_run_freeze_bridges_short_gap_without_dropping_phase() -> None:
+    """08_SPEC S3: 2 周期爬行中间插入 3 次 0.15s freeze 闪烁，相位应被桥接而非丢弃。"""
+    cfg = load_config("crawl_agar").kinematics.s_run
+    assert cfg.phase_bridge_s >= 0.15
+    fps = 30.0
+    counter = SRunCounter(cfg, fps=fps)
+    u = np.array([1.0, 0.0], dtype=np.float32)
+    L_ref = 100.0
+
+    total_frames = int(4.4 * fps)  # 0.5 Hz -> 2.2 个完整周期（留出完整结算余量）
+    freeze_len = max(1, int(round(0.15 * fps)))
+    freeze_starts = [30, 60, 90]
+
+    for i in range(total_frames):
+        if any(s <= i < s + freeze_len for s in freeze_starts):
+            counter.freeze()
+            continue
+        t = i / fps
+        phi = 2.0 * np.pi * 0.5 * t
+        phi_w = float(np.arctan2(np.sin(phi), np.cos(phi)))
+        # 每周期沿体轴推进 0.4 * L (40px >> min_disp_ratio * L_ref = 8px)
+        center = np.array([40.0 * 0.5 * t, 0.0], dtype=np.float32)
+        counter.step(i=i, gate_ok=True, phi=phi_w, center=center, u=u, L_ref=L_ref)
+
+    assert counter.s_count == 2
+    assert counter.rejected["no_disp"] == 0
+    assert counter.rejected["wrong_dir"] == 0
+
+
+def test_s_run_curved_path_displacement() -> None:
+    """08_SPEC S4: 沿强弯曲圆弧爬行 2 周期，use_path_disp=True 时切向路径积分准确计数。"""
+    cfg = load_config("crawl_agar").kinematics.s_run
+    assert cfg.use_path_disp is True
+    fps = 30.0
+    L_ref = 100.0
+    v = 20.0  # px/s -> 每周期 (0.5Hz) 推进 40px 弧长
+    radius = 7.0  # 每周期转 40/7 ≈ 5.7 rad，端点直线弦仅 ≈4px (< min_disp_ratio*L=8px)
+
+    def _make_counter() -> SRunCounter:
+        return SRunCounter(cfg, fps=fps)
+
+    def _run(counter: SRunCounter) -> SRunCounter:
+        total_frames = int(4.4 * fps)  # 2.2 个完整周期
+        for i in range(total_frames):
+            t = i / fps
+            theta_arc = v * t / radius
+            cx, cy = 300.0 + radius * np.cos(theta_arc), 300.0 + radius * np.sin(theta_arc)
+            center = np.array([cx, cy], dtype=np.float32)
+            # 体轴指向路径前进切线方向（逆时针圆弧）
+            tangent = np.array([-np.sin(theta_arc), np.cos(theta_arc)], dtype=np.float32)
+            phi = 2.0 * np.pi * 0.5 * t
+            phi_w = float(np.arctan2(np.sin(phi), np.cos(phi)))
+            counter.step(
+                i=i,
+                gate_ok=True,
+                phi=phi_w,
+                center=center,
+                u=tangent,
+                L_ref=L_ref,
+                tangent_mid=tangent,
+            )
+        return counter
+
+    counter = _run(_make_counter())
+    assert counter.s_count == 2
+    assert counter.rejected["no_disp"] == 0
+
+    # 对照组：旧版首尾直线弦投影在强弯弧下会把每周期位移压到阈值之下
+    cfg_chord = replace(cfg, use_path_disp=False)
+    counter_chord = _run(SRunCounter(cfg_chord, fps=fps))
+    assert counter_chord.s_count <= 1
+    assert counter_chord.rejected["no_disp"] >= 1

@@ -23,27 +23,38 @@ tracking:
 pose:
   coil_aware_reorient: true
   min_len_over_width: 2.2
+  mask_refine:
+    enabled: true
+    use_bg_sub: true
+    prior_dilate_px: 8
+    bg_mad_k: 3.5
+    bg_min_diff: 8
 
 kinematics:
-  k_body: 1.0                 # 通用单帧特征沿用 1.0；S 计数由 s_run.k_body (1.15) 独立控制
-  smooth_s: 0.17
+  k_body: 1.0                 # 通用单帧特征沿用 1.0；S 计数由 s_run.k_body 独立控制
+  smooth_s: 0.15
   gap_max_s: 0.30
   dc_remove_window_s: 0.0     # 关闭动态跳变的 DC 扣除，避免相平面突变
   wave:
-    win_s: 1.8                # 从 2.5s 缩短为 1.8s，防止短促单周期被静止帧稀释
-    min_valid_frac: 0.5
-    r_min: 0.12
+    win_s: 1.0                # 角动量门限只需 1.0s 即可稳定判别，大幅减少边缘相位损失
+    min_valid_frac: 0.55
+    r_min: 0.14
     eps_min: 0.15
+    gate_mode: "angular_momentum"
+    coherence_min: 0.55
+    omega_min_rad_s: 0.35
     post_ratio_min: 0.30
     amp_post_min: 0.06
   s_run:
     enabled: true
-    k_body: 1.15
-    dir_lock_rad: 0.55        # 从 0.80 降至 0.55
+    k_body: 1.45              # 对齐 C. elegans 琼脂爬行真实波长 λ ≈ 0.65 L
+    dir_lock_rad: 0.55
     reverse_phase_eps_rad: 0.45
     gap_hold_s: 0.90
+    phase_bridge_s: 0.45      # 修复短闪烁吞相位
+    use_path_disp: true       # 弯道切向路径积分
     slowdown_hold_s: 3.0
-    min_disp_ratio: 0.08      # 从 0.18 降至 0.08，修复打滑/慢爬 S 周期被 no_disp 误杀
+    min_disp_ratio: 0.08
     bridge_gap_s: 0.50
     adaptive_k_body: true
     eof_tail_frac: 0.65
@@ -51,8 +62,10 @@ kinematics:
     enabled: false
   turn:
     enabled: true
-    R_enter: 0.58
-    R_exit: 0.72
+    R_enter: 0.58             # 深 Ω 弯阈值（保持兼容 test_turns.py）
+    R_c_enter: 0.75           # 新增：标准 145°~180° C 形弯联合阈值
+    c_enter_rad: 1.65
+    R_exit: 0.82
     min_dwell_s: 0.15
     cooldown_s: 0.45
     max_curl_s: 2.0

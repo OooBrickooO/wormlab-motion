@@ -47,6 +47,13 @@ class KinematicsEngine:
         self.gap_hold_frames = max(1, int(round(float(cfg.s_run.gap_hold_s) * self.fps)))
         self.act_win_frames = max(1, int(round(1.5 * self.fps)))
 
+        # 游泳纯 C 计数模式（swing enabled 且 s_run 关闭）：禁止 (x,y) 坐标域平滑拉直 C 形波峰，
+        # 改为在标量 c(t) 域做轻度中值平滑（08_SPEC C3）
+        self._swing_scalar_mode = bool(cfg.swing.enabled and not cfg.s_run.enabled)
+        if self._swing_scalar_mode:
+            self.h_smooth = 0
+        self._h_c = max(1, int(round(float(cfg.swing.c_smooth_s) * self.fps / 2.0)))
+
         # 原始输入序列
         self.raw_poses: list[Pose | None] = []
         self.valid_dense: list[np.ndarray | None] = []
@@ -64,7 +71,7 @@ class KinematicsEngine:
 
         # 阶段 2: 门限 + 计数器步进
         self.s = SRunCounter(cfg.s_run, fps=self.fps)
-        self.swing = SwingCounter(cfg.swing, fps=self.fps, gap_hold_s=cfg.s_run.gap_hold_s)
+        self.swing = SwingCounter(cfg.swing, fps=self.fps, gap_hold_s=cfg.swing.gap_hold_s)
         self.turn = TurnCounter(cfg.turn, fps=self.fps)
         self._occ_hold_frames = max(self.gap_hold_frames, int(round(6.0 * self.fps)))
         slow_hold_s = float(getattr(cfg.s_run, "slowdown_hold_s", 2.5))
@@ -161,6 +168,21 @@ class KinematicsEngine:
         self.feats.append(feat)
         self._s_feats.append(self._make_s_feat(feat))
 
+    def _smooth_c_at(self, i: int, c_raw: float) -> float:
+        """游泳纯 C 模式：在标量 c(t) 域做 ±_h_c 帧窗口中值平滑（绝不在 (x,y) 坐标域平滑）。"""
+        h = self._h_c
+        if not self._swing_scalar_mode or h <= 0:
+            return float(c_raw)
+        vals: list[float] = []
+        for k in range(max(0, i - h), min(len(self.feats), i + h + 1)):
+            fk = self.feats[k]
+            if fk is not None and math.isfinite(fk.c):
+                vals.append(float(fk.c))
+        if not vals:
+            return float(c_raw)
+        vals.sort()
+        return float(vals[len(vals) // 2])
+
     def _L_ref(self, i: int) -> float:
         lo = max(0, i - self.ref_win_frames)
         ls = [self.feats[k].L for k in range(lo, i + 1) if self.feats[k] is not None]
@@ -197,7 +219,11 @@ class KinematicsEngine:
         hi = min(len(self.feats), i + self.h_wave + 1)
         win_feats = self._s_feats[lo:hi] if self.cfg.s_run.enabled else self.feats[lo:hi]
         # 使用窗口实际跨度作为边缘帧的有效率分母，使首尾帧与 proto_kinematics 保持一致
-        gate = wave_gate(win_feats, self.cfg.wave, expected_len=len(win_feats)) if s_feat is not None else GateResult.off()
+        gate = (
+            wave_gate(win_feats, self.cfg.wave, expected_len=len(win_feats), fps=self.fps)
+            if s_feat is not None
+            else GateResult.off()
+        )
         if feat is not None and gate.r_med >= self.cfg.wave.r_min:
             self.eps_history.append(gate.eps)
 
@@ -216,6 +242,10 @@ class KinematicsEngine:
             if self.turn.in_curl and deep_coil:
                 # 真正深度盘绕自交：驻留超过 min_dwell 才作废未完成周期，否则仅冻结
                 if (i - self.turn.curl_start) >= self.turn.min_dwell_frames:
+                    # 深弯打断前先按 eof_tail_frac 结算近满周期（08_SPEC S5）
+                    tail_frac = getattr(self.cfg.s_run, "eof_tail_frac", None)
+                    if tail_frac is not None and self.s.active:
+                        self.s.settle_partial(i, L_ref, tail_frac=float(tail_frac))
                     self.s.force_abort("curl_or_bad")
                     self._occ_run = 0
                     self._pause_run = 0
@@ -250,14 +280,20 @@ class KinematicsEngine:
                     center=s_feat.center,
                     u=s_feat.u,
                     L_ref=L_ref,
+                    tangent_mid=feat.tangent_mid if feat is not None else None,
                 )
 
         if self.cfg.swing.enabled:
+            if feat is not None:
+                c_step = self._smooth_c_at(i, float(feat.c))
+            else:
+                c_step = 0.0
             self.swing.step(
                 i,
-                feat.c if feat is not None else 0.0,
+                c_step,
                 valid=(feat is not None),
                 u_curr=(feat.u if feat is not None else None),
+                R_curr=(feat.R if feat is not None else None),
             )
 
         speed_bls = self._speed_bls(i, L_ref)
@@ -496,43 +532,185 @@ class KinematicsEngine:
         c_unit: str = "cycle",
         frame_height: int = 1080,
     ) -> tuple[TrackReport, list[PerFrame]]:
-        """Pass B 终稿运动学计算：在标准 run() 基础上按配置执行短缺口桥接、自适应体波数与文末余弦补全。"""
-        if not cfg.s_run.enabled:
-            return KinematicsEngine.run(poses, fps=fps, cfg=cfg, c_unit=c_unit, frame_height=frame_height)
-
+        """Pass B 终稿运动学计算：在标准 run() 基础上按配置执行短缺口桥接、自适应体波数、
+        免骨架游泳双轨融合与文末尾数补全。"""
         work_poses: Sequence[Pose | None] = poses
-        bridge_s = float(getattr(cfg.s_run, "bridge_gap_s", 0.0))
-        if bridge_s > 0.0:
-            from wormlab.pose.orientation import bridge_short_pose_gaps
+        if cfg.s_run.enabled:
+            bridge_s = float(getattr(cfg.s_run, "bridge_gap_s", 0.0))
+            if bridge_s > 0.0:
+                from wormlab.pose.orientation import bridge_short_pose_gaps
 
-            work_poses = bridge_short_pose_gaps(work_poses, fps=fps, max_gap_s=bridge_s)
+                work_poses = bridge_short_pose_gaps(work_poses, fps=fps, max_gap_s=bridge_s)
 
         eng = KinematicsEngine(cfg=cfg, fps=fps, c_unit=c_unit, frame_height=frame_height)
         for idx, p in enumerate(work_poses):
             eng.push(idx, p)
         rep, pfs = eng.finalize()
 
-        valid_feats = [f for f in eng.feats if f is not None]
-        if getattr(cfg.s_run, "adaptive_k_body", False) and len(valid_feats) >= 6:
-            base_k = float(cfg.s_run.k_body)
-            k_grid = (1.0, 1.15, 1.30, 1.45, 1.60)
-            k_scores = {
-                k: float(np.median([math.hypot(*project_trig_modes(f.th, k_body=k)) for f in valid_feats]))
-                for k in k_grid
-            }
-            base_score = k_scores.get(base_k)
-            if base_score is None:
-                base_score = float(
-                    np.median([math.hypot(*project_trig_modes(f.th, k_body=base_k)) for f in valid_feats])
-                )
-            top_k = max(k_grid, key=lambda k: k_scores[k])
-            if base_score < 0.30 and k_scores[top_k] >= 1.20 * base_score and abs(top_k - base_k) > 1e-6:
-                cfg_k = replace(cfg, s_run=replace(cfg.s_run, k_body=top_k))
-                eng = KinematicsEngine(cfg=cfg_k, fps=fps, c_unit=c_unit, frame_height=frame_height)
-                for idx, p in enumerate(work_poses):
-                    eng.push(idx, p)
-                rep, pfs = eng.finalize()
-                valid_feats = [f for f in eng.feats if f is not None]
+        # 自适应体波数 k*：仅当 s_run 启用且开关打开（08_SPEC S1 —— 解除 base_score 死锁）
+        if cfg.s_run.enabled and getattr(cfg.s_run, "adaptive_k_body", False):
+            eng, rep, pfs, _ = KinematicsEngine._maybe_adapt_k_body(
+                work_poses, fps=fps, cfg=cfg, c_unit=c_unit, frame_height=frame_height, eng=eng, rep=rep, pfs=pfs
+            )
 
-        # 文末尾数补全已统一由 finalize() 内的 SRunCounter.settle_partial() 完成（与中途停顿结算同一口径）
+        # 免骨架游泳双轨融合（08_SPEC C4 / Swim-3/4）：仅 swing 模式
+        if cfg.swing.enabled and bool(getattr(cfg.swing, "shape_fallback_enabled", False)):
+            rep, pfs = KinematicsEngine._maybe_apply_swim_shape_fallback(
+                work_poses, fps=fps, cfg=cfg, c_unit=c_unit, rep=rep, pfs=pfs
+            )
+
         return rep, pfs
+
+    @staticmethod
+    def _maybe_adapt_k_body(
+        work_poses: Sequence[Pose | None],
+        fps: float,
+        cfg: KinCfg,
+        c_unit: str,
+        frame_height: int,
+        eng: KinematicsEngine,
+        rep: TrackReport,
+        pfs: list[PerFrame],
+    ) -> tuple[KinematicsEngine, TrackReport, list[PerFrame], float]:
+        """在候选 k 网格中选择使行波能量（活跃帧 75 分位 r）最大者；要求优于 base_k 至少 8% 才切换。"""
+        valid_feats = [f for f in eng.feats if f is not None]
+        if len(valid_feats) < 6:
+            return eng, rep, pfs, float(cfg.s_run.k_body)
+
+        base_k = float(cfg.s_run.k_body)
+        k_grid = (1.00, 1.15, 1.30, 1.45, 1.60, 1.75)
+        k_scores: dict[float, float] = {}
+        for k in k_grid:
+            r_vals = [math.hypot(*project_trig_modes(f.th, k_body=k)) for f in valid_feats]
+            k_scores[k] = float(np.percentile(r_vals, 75))
+        if base_k not in k_scores:
+            r_vals = [math.hypot(*project_trig_modes(f.th, k_body=base_k)) for f in valid_feats]
+            base_score = float(np.percentile(r_vals, 75))
+        else:
+            base_score = k_scores[base_k]
+
+        top_k = max(k_grid, key=lambda k: k_scores[k])
+        if k_scores[top_k] >= 1.08 * max(1e-9, base_score) and abs(top_k - base_k) > 1e-6:
+            cfg_k = replace(cfg, s_run=replace(cfg.s_run, k_body=top_k))
+            eng = KinematicsEngine(cfg=cfg_k, fps=fps, c_unit=c_unit, frame_height=frame_height)
+            for idx, p in enumerate(work_poses):
+                eng.push(idx, p)
+            rep, pfs = eng.finalize()
+            return eng, rep, pfs, top_k
+        return eng, rep, pfs, base_k
+
+    @staticmethod
+    def _maybe_apply_swim_shape_fallback(
+        poses: Sequence[Pose | None],
+        fps: float,
+        cfg: KinCfg,
+        c_unit: str,
+        rep: TrackReport,
+        pfs: list[PerFrame],
+    ) -> tuple[TrackReport, list[PerFrame]]:
+        """免骨架椭圆/偏度双轨计数回填：小虫 / 骨架高 BAD 率 / 骨架零输出但存在显著周期运动时启用。"""
+        from wormlab.kinematics.swim_shape import count_swim_from_shape
+
+        n_skel_ok = 0  # 骨架有效 (dense 非空且非 BAD) 帧数
+        n_bad = 0
+        n_missing = 0
+        lengths: list[float] = []
+        for p in poses:
+            if p is None:
+                n_missing += 1
+                continue
+            if p.dense is None:
+                n_missing += 1
+                continue
+            if p.quality == Quality.BAD:
+                n_bad += 1
+            else:
+                n_skel_ok += 1
+                if p.length > 1.0:
+                    lengths.append(float(p.length))
+
+        med_len = float(np.median(lengths)) if lengths else float("inf")
+        denom = max(1, n_skel_ok + n_bad)
+        bad_ratio = float(n_bad + n_missing) / float(denom)
+
+        shape_cycles, shape_bends, peaks = count_swim_from_shape(poses, fps=fps, cfg=cfg.swing)
+
+        skeleton_bends = int(rep.c_bends)
+        need_fallback = (
+            (np.isfinite(med_len) and med_len < float(cfg.swing.shape_min_len_px))
+            or (bad_ratio > float(cfg.swing.shape_bad_ratio_thresh))
+            or (skeleton_bends == 0 and shape_bends >= 2)
+        )
+        if not need_fallback:
+            return rep, pfs
+
+        # 免骨架主轨回填：逐帧累计波峰数（单调不减），同步更新 c_count 与 behavior=THRASH
+        n_frames = len(pfs)
+        peaks = np.asarray(peaks, dtype=np.int64)
+        frame_behavior = KinematicsEngine._shape_thrash_mask(peaks, n_frames, fps)
+
+        new_pfs: list[PerFrame] = []
+        for pf in pfs:
+            b_i = int(np.count_nonzero(peaks <= pf.frame_idx)) if peaks.size else 0
+            cyc_i = b_i // 2
+            turn_i = int(pf.c_turn)
+            c_tot_i = int(b_i if c_unit == "bend" else cyc_i) + turn_i
+            beh = Behavior.THRASH if frame_behavior[pf.frame_idx] else pf.behavior
+            new_pfs.append(
+                replace(
+                    pf,
+                    behavior=beh,
+                    c_cycles=cyc_i,
+                    c_bends=b_i,
+                    c_count=c_tot_i,
+                )
+            )
+
+        c_cyc = shape_cycles
+        c_bnd = shape_bends
+        c_tot = int(c_bnd if c_unit == "bend" else c_cyc) + int(rep.c_turn_count)
+
+        mode_counts = Counter(pf.behavior.value for pf in new_pfs)
+        mode_time = {b.value: round(float(mode_counts.get(b.value, 0)) / fps, 3) for b in Behavior}
+        obs_sec = float(n_skel_ok) / fps
+        freq_c = float(c_tot) / obs_sec if obs_sec > 1e-3 else 0.0
+        avg_freq_leg = float(rep.s_count + c_tot) / obs_sec if obs_sec > 1e-3 else 0.0
+
+        n_active = sum(1 for pf in new_pfs if pf.behavior in {Behavior.CRAWL, Behavior.THRASH, Behavior.TURN, Behavior.MOVING})
+        act_score = float(n_active) / float(max(1, n_skel_ok)) if n_skel_ok else 0.0
+
+        if rep.s_count > 0:
+            dom_beh = Behavior.CRAWL
+        elif c_tot > 0:
+            dom_beh = Behavior.THRASH
+        elif act_score < 0.15:
+            dom_beh = Behavior.STATIC
+        else:
+            non_inv = [pf.behavior for pf in new_pfs if pf.behavior != Behavior.INVALID]
+            dom_beh = Counter(non_inv).most_common(1)[0][0] if non_inv else Behavior.STATIC
+
+        new_rep = replace(
+            rep,
+            c_cycles=int(c_cyc),
+            c_bends=int(c_bnd),
+            c_count=int(c_tot),
+            mode_time=mode_time,
+            freq_c_hz=round(freq_c, 4),
+            avg_freq_legacy=round(avg_freq_leg, 4),
+            activity_score=round(float(np.clip(act_score, 0.0, 1.0)), 4),
+            motion_type_legacy=behavior_to_legacy_motion_type(dom_beh),
+        )
+        return new_rep, new_pfs
+
+    @staticmethod
+    def _shape_thrash_mask(peaks: np.ndarray, n_frames: int, fps: float) -> np.ndarray:
+        """在检测到的形状波峰 ±0.5s 窗口内标记 THRASH 行为。"""
+        mask = np.zeros(max(0, n_frames), dtype=bool)
+        if peaks.size == 0 or n_frames <= 0:
+            return mask
+        win = max(1, int(round(0.5 * float(fps))))
+        for pk in peaks:
+            lo = max(0, int(pk) - win)
+            hi = min(n_frames, int(pk) + win + 1)
+            mask[lo:hi] = True
+        return mask

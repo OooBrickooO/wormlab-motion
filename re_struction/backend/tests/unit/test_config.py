@@ -23,7 +23,10 @@ def test_load_swim_liquid_profile() -> None:
     assert cfg.kinematics.s_run.enabled is False
     assert cfg.kinematics.turn.enabled is False
     assert cfg.kinematics.swing.enabled is True
-    assert cfg.kinematics.smooth_s == pytest.approx(0.07)
+    assert cfg.kinematics.smooth_s == pytest.approx(0.0)  # 游泳模式禁止 (x,y) 坐标域平滑（08_SPEC C3）
+    assert cfg.kinematics.swing.gap_hold_s == pytest.approx(0.35)
+    assert cfg.kinematics.swing.c_smooth_s == pytest.approx(0.07)
+    assert cfg.kinematics.swing.shape_fallback_enabled is True
     assert cfg.kinematics.wave.win_s == pytest.approx(1.0)
 
 

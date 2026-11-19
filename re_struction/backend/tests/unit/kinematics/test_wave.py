@@ -51,3 +51,54 @@ def test_wave_gate_traveling_vs_standing_vs_head_wiggle() -> None:
 
     with pytest.raises(NotImplementedError):
         eigenworm_basis()
+
+
+def test_wave_gate_angular_momentum_slow_crawl() -> None:
+    """08_SPEC S2: 角动量门限放行 0.18Hz 慢爬，同时严格拦截驻波/头部试探/静态噪声。"""
+    overrides = {
+        "kinematics": {
+            "wave": {
+                "win_s": 1.2,
+                "min_valid_frac": 0.55,
+                "r_min": 0.14,
+                "eps_min": 0.15,
+                "gate_mode": "angular_momentum",
+                "coherence_min": 0.55,
+                "omega_min_rad_s": 0.35,
+                "post_ratio_min": 0.30,
+                "amp_post_min": 0.06,
+            }
+        }
+    }
+    cfg = load_config("crawl_agar", overrides=overrides).kinematics
+    fps = 30.0
+
+    # 1. 0.18 Hz 慢速爬行（原 eps 模式因窗内扫弧不足而失败）-> angular_momentum 放行
+    scn_slow = Scn(kind="crawl_fwd", duration_s=8.0, fps=fps, A=0.8, f=0.18)
+    dense_slow, _ = make_series(scn_slow)
+    feats_slow = [compute_features(d, cfg) for d in dense_slow]
+    res_slow = wave_gate(feats_slow, cfg.wave, expected_len=len(feats_slow), fps=fps)
+    assert res_slow.ok is True
+    assert res_slow.coherence >= 0.55
+    assert abs(res_slow.mean_omega) >= 0.35
+
+    # 2. 驻波 (Lz ≡ 0) -> 严格拒绝
+    scn_st = Scn(kind="standing", duration_s=6.0, fps=fps, A=0.8, f=0.5)
+    dense_st, _ = make_series(scn_st)
+    feats_st = [compute_features(d, cfg) for d in dense_st]
+    res_st = wave_gate(feats_st, cfg.wave, expected_len=len(feats_st), fps=fps)
+    assert res_st.ok is False
+
+    # 3. 仅头部试探摆动 (后半身振幅 ~0) -> 严格拒绝
+    scn_hw = Scn(kind="head_wiggle", duration_s=6.0, fps=fps)
+    dense_hw, _ = make_series(scn_hw)
+    feats_hw = [compute_features(d, cfg) for d in dense_hw]
+    res_hw = wave_gate(feats_hw, cfg.wave, expected_len=len(feats_hw), fps=fps)
+    assert res_hw.ok is False
+
+    # 4. 静态噪声 (幅度 < r_min) -> 严格拒绝
+    scn_ns = Scn(kind="static_noise", duration_s=6.0, fps=fps)
+    dense_ns, _ = make_series(scn_ns)
+    feats_ns = [compute_features(d, cfg) for d in dense_ns]
+    res_ns = wave_gate(feats_ns, cfg.wave, expected_len=len(feats_ns), fps=fps)
+    assert res_ns.ok is False

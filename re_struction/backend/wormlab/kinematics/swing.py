@@ -14,7 +14,12 @@ from wormlab.config import SwingCfg
 
 
 class SwingCounter:
-    """对总转角 c(t) 做迟滞双侧高位计数，同时维护 c_bends 与 c_cycles。"""
+    """对总转角 c(t) 做迟滞双侧高位计数，同时维护 c_bends 与 c_cycles。
+
+    08_SPEC C2 修复：头尾翻转检测改为 1 帧对齐参考 u_prev_aligned + 深弯弦长保护 R_curr +
+    单帧物理极限阈值 dot < -0.50（1 帧内真实旋转绝不可能超过 120°），彻底杜绝
+    游泳虫连续旋转（15°~30°/帧）时 EMA 滞后导致的反向锁死。
+    """
 
     def __init__(self, cfg: SwingCfg, fps: float, gap_hold_s: float = 0.30) -> None:
         self.cfg = cfg
@@ -26,15 +31,20 @@ class SwingCounter:
         self.side: int = 0
         self.entries: int = 0
         self.flips: int = 0
+        self.flip_corrections: int = 0  # 头尾 180° 翻转纠正次数（诊断用：连续旋转下应为 0）
         self.last_flip: int = -(10**9)
         self.last_high_frame: int = -(10**9)
         self.invalid_run: int = 0
         self.extreme: float = 0.0
-        self.u_ref: np.ndarray | None = None
+        self.u_ref: np.ndarray | None = None  # 兼容保留（旧 EMA 参考，已不再参与判定）
+        self.u_prev_aligned: np.ndarray | None = None
         self._recent_c: list[float] = []
 
-    def _fix_head_tail_flip(self, c_val: float, u_curr: np.ndarray | None) -> float:
+    def _fix_head_tail_flip(self, c_val: float, u_curr: np.ndarray | None, R_curr: float | None = None) -> float:
         if u_curr is None:
+            return c_val
+        # 深 C/Ω 弯时首尾距离极小，弦向量不可靠，跳过弦翻转检测
+        if R_curr is not None and np.isfinite(R_curr) and float(R_curr) < 0.35:
             return c_val
         u_arr = np.asarray(u_curr, dtype=np.float64).reshape(-1)
         if u_arr.shape[0] != 2 or not np.all(np.isfinite(u_arr)):
@@ -43,26 +53,29 @@ class SwingCounter:
         if u_norm <= 1e-6:
             return c_val
         u_unit = u_arr / u_norm
-        if self.u_ref is None:
-            self.u_ref = u_unit.copy()
+        if self.u_prev_aligned is None:
+            self.u_prev_aligned = u_unit.copy()
             return c_val
-        if float(np.dot(u_unit, self.u_ref)) < -0.15:
+        # 仅当单帧突跳 > 120° (dot < -0.50) 时才判定为头尾 180° 翻转；
+        # 正常游泳旋转（如 15°~30°/帧）时 u_prev_aligned 同步旋转，绝不误翻转！
+        if float(np.dot(u_unit, self.u_prev_aligned)) < -0.50:
             c_val = -c_val
             u_unit = -u_unit
-        ref = 0.85 * self.u_ref + 0.15 * u_unit
-        self.u_ref = ref / max(float(np.linalg.norm(ref)), 1e-9)
+            self.flip_corrections += 1
+        self.u_prev_aligned = u_unit.copy()
         return c_val
 
-    def step(self, i: int, c: float, valid: bool, u_curr: np.ndarray | None = None) -> None:
+    def step(self, i: int, c: float, valid: bool, u_curr: np.ndarray | None = None, R_curr: float | None = None) -> None:
         if not valid or not np.isfinite(c):
             self.invalid_run += 1
             if self.invalid_run > self.gap_hold_frames:
                 self.side = 0
                 self.u_ref = None
+                self.u_prev_aligned = None
             return
         self.invalid_run = 0
 
-        c_val = self._fix_head_tail_flip(float(c), u_curr)
+        c_val = self._fix_head_tail_flip(float(c), u_curr, R_curr)
 
         self._recent_c.append(c_val)
         if len(self._recent_c) > self.bias_win_frames:

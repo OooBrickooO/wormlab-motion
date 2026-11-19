@@ -19,12 +19,18 @@ tracking:
     bg_thresholds: [12, 8, 5]
 
 pose:
-  min_mask_px: 15
-  min_len_over_width: 1.8
+  min_mask_px: 12
+  min_len_over_width: 1.6
   upscale_below_px: 120
+  mask_refine:
+    enabled: true
+    use_bg_sub: true
+    prior_dilate_px: 8
+    bg_mad_k: 3.0
+    bg_min_diff: 6
 
 kinematics:
-  smooth_s: 0.07
+  smooth_s: 0.0                 # 游泳模式禁止 (x, y) 坐标域均值平滑（防止拉直 C 峰）
   wave:
     win_s: 1.0
   s_run:
@@ -35,3 +41,10 @@ kinematics:
     enabled: true
     bend_high: 0.75
     min_flip_interval_s: 0.08
+    gap_hold_s: 0.35
+    c_smooth_s: 0.07            # 在标量 c(t) 域轻度平滑
+    shape_fallback_enabled: true
+    shape_min_len_px: 55.0
+    shape_bad_ratio_thresh: 0.15
+    shape_aspect_prom: 0.06
+    shape_motion_min: 1.5

@@ -94,9 +94,9 @@ def test_omega_self_touch_loop_flag() -> None:
 
 def test_tiny_mask_and_upscaled_flag() -> None:
     cfg = load_config("swim_liquid").pose
-    # 空掩码 / 小于 min_mask_px (15px)
+    # 空掩码 / 小于 min_mask_px (12px, 08_SPEC §6 swim_liquid)
     tiny = np.zeros((30, 30), dtype=bool)
-    tiny[10:13, 10:14] = True
+    tiny[10:12, 10:13] = True
     p_tiny = extract_pose(tiny, (0, 0), cfg)
     assert p_tiny.dense is None
     assert p_tiny.quality == Quality.MISSING
@@ -122,3 +122,49 @@ def test_mask_refine_interface() -> None:
     assert refined.shape == mask.shape
     assert refined.dtype == bool
     assert int(refined.sum()) > 0
+
+
+def test_extract_pose_fills_shape_moments() -> None:
+    """08_SPEC Workstream A: extract_pose 必须填充免骨架椭圆形状描述子（含 fallback PCA 路径）。"""
+    import math
+
+    cfg = load_config("crawl_agar").pose
+    s = np.linspace(0.0, 1.0, 200)
+    L_true = 140.0
+    ds = L_true / (len(s) - 1)
+
+    def _render(theta: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
+        xs = 200.0 + np.cumsum(np.cos(theta) * ds)
+        ys = 200.0 + np.cumsum(np.sin(theta) * ds)
+        gt_curve = np.stack([xs, ys], axis=1).astype(np.float32)
+        mask, origin, _ = _render_curve_mask(gt_curve, width_px=8.0)
+        return mask, origin
+
+    # 1. 细直虫：ell_aspect 远小于 0.35，偏心率接近 1
+    mask_line, origin_line = _render(np.zeros_like(s))
+    p_line = extract_pose(mask_line, origin_line, cfg)
+    assert p_line.dense is not None
+    assert math.isfinite(p_line.ell_aspect)
+    assert math.isfinite(p_line.ell_ecc)
+    assert math.isfinite(p_line.ell_angle)
+    assert math.isfinite(p_line.ell_skew_minor)
+    assert p_line.ell_aspect < 0.35
+    assert p_line.ell_ecc > 0.9
+
+    # 2. 深弯 C 虫（约 229° 总转角）：等效椭圆短长轴比显著跃升，ell_aspect > 0.50
+    mask_c, origin_c = _render(4.0 * (s - 0.5))
+    p_c = extract_pose(mask_c, origin_c, cfg)
+    assert p_c.dense is not None
+    assert p_c.ell_aspect > 0.50
+
+    # 3. 180° 半圆 C 虫：解析值 b/a = sqrt((1/2-1/π)/(1/2)) ≈ 0.44（忽略端帽），显著高于直虫
+    mask_semi, origin_semi = _render(np.pi * (s - 0.5))
+    p_semi = extract_pose(mask_semi, origin_semi, cfg)
+    assert p_semi.dense is not None
+    assert p_semi.ell_aspect > 0.40
+
+    # 4. 极小掩码 (< 6px)：形状描述子回退 NaN
+    tiny = np.zeros((30, 30), dtype=bool)
+    tiny[5, 5:7] = True
+    p_tiny2 = extract_pose(tiny, (0, 0), cfg)
+    assert not math.isfinite(p_tiny2.ell_aspect)

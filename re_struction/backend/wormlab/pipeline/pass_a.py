@@ -254,14 +254,22 @@ class PassA:
         ref_area_hist: dict[int, list[float]] = {}
 
         rec_cfg = self.cfg.tracking.recovery
+        mask_refine_cfg = self.cfg.pose.mask_refine
+        # 背景差分前置条件：滞后召回需要，或原图 ROI 掩码精修需要（08_SPEC Workstream A）
+        need_bg_gray = bool(
+            (rec_cfg.enabled and rec_cfg.bg_sub_enabled)
+            or (mask_refine_cfg.enabled and mask_refine_cfg.use_bg_sub)
+        )
         bg_gray: np.ndarray | None = None
-        if rec_cfg.enabled and rec_cfg.bg_sub_enabled and not isinstance(source, ImageSource):
+        if need_bg_gray and not isinstance(source, ImageSource):
             bg_gray = compute_static_median_gray(
                 self.job.video_path,
                 total_frames=total_frames,
                 n_samples=int(rec_cfg.bg_sample_frames),
                 cancel_check=lambda: self.ctrl.cancelled,
             )
+        # 掩码精修或游泳免骨架计数需要逐帧灰度图（roi_motion 帧间活跃度）
+        need_frame_gray = bool(mask_refine_cfg.enabled or self.cfg.kinematics.swing.enabled)
 
         batch_size = max(1, int(self.cfg.detection.batch_size))
         q_size = max(2, int(self.cfg.pipeline.frame_queue))
@@ -311,6 +319,7 @@ class PassA:
 
         def tracker_loop() -> None:
             emit_every = max(1, int(self.cfg.pipeline.emit_every))
+            prev_frame_gray: np.ndarray | None = None
             try:
                 while not self.ctrl.cancelled:
                     try:
@@ -353,14 +362,16 @@ class PassA:
                                     if len(hist) > 25:
                                         del hist[0]
 
-                        # 并行提取活跃目标的中心线姿态（mask_refine 开启时透传当前帧灰度图）
+                        # 并行提取活跃目标的中心线姿态（掩码精修/免骨架计数开启时透传当前帧、背景与上一帧灰度图）
                         frame_gray: np.ndarray | None = None
-                        if self.cfg.pose.mask_refine.enabled and frm is not None:
+                        if need_frame_gray and frm is not None:
                             frame_gray = frm if frm.ndim == 2 else cv2.cvtColor(frm, cv2.COLOR_BGR2GRAY)
 
                         def _extract_one(
                             to: TrackOut,
                             frame_gray: np.ndarray | None = frame_gray,
+                            bg_gray: np.ndarray | None = bg_gray,
+                            prev_frame_gray: np.ndarray | None = prev_frame_gray,
                             cur_idx: int = cur_idx,
                             dets: list[Detection] = dets,
                         ) -> Pose | None:
@@ -375,9 +386,17 @@ class PassA:
                                 pose_extractors[to.uid] = ext
                             elif to.head_xy is not None and ext.user_head_xy is None and ext.prev_dense is None:
                                 ext.set_user_head_xy(to.head_xy)
-                            return ext.process(det, frame_gray=frame_gray, frame_idx=cur_idx)
+                            return ext.process(
+                                det,
+                                frame_gray=frame_gray,
+                                bg_gray=bg_gray,
+                                prev_frame_gray=prev_frame_gray,
+                                frame_idx=cur_idx,
+                            )
 
                         poses = list(pose_pool.map(_extract_one, outs))
+                        # 供下一帧 roi_motion 计算的上一帧灰度图
+                        prev_frame_gray = frame_gray
 
                         draw_items: list[DrawItem] = []
                         live_tracks: list[dict[str, Any]] = []

@@ -74,3 +74,33 @@ def modal_phase(a1: float, a2: float) -> float:
 def eigenworm_basis(*args: object, **kwargs: object) -> np.ndarray:
     """数据驱动 eigenworm 正交基（D4' 预留接口）。"""
     raise NotImplementedError("eigenworm_basis 为 D4' 预留接口，当前固定使用三角基。")
+
+
+def fit_track_eigenworms(
+    th_matrix: np.ndarray,
+    k_body: float = 1.45,
+) -> tuple[np.ndarray, np.ndarray]:
+    """对整条轨迹有效帧的切线角矩阵 Θ̃ ∈ R^{T×M} 做 SVD，取前 2 阶主模态作为 eigenworm 基 (e1, e2)。
+
+    - 仅做离线 A/B 实验用（PassB / 调参），不进入流式 push() 因果路径；
+    - 用 k_body 三角基对齐符号与手性：确保 e2·sin(2πk·s) > 0（头→尾行波对应 dΦ > 0）；
+    - 保留 eigenworm_basis() 抛 NotImplementedError 的兼容约定（见 test_wave.py）。
+    """
+    th = np.asarray(th_matrix, dtype=np.float64)
+    if th.ndim != 2 or th.shape[0] < 2 or th.shape[1] < 4:
+        raise ValueError("th_matrix 需为 (T>=2, M>=4) 的有效帧切线角矩阵")
+
+    u_mat, s_vals, vh = np.linalg.svd(th, full_matrices=False)
+    e1 = vh[0].astype(np.float64)
+    e2 = vh[1].astype(np.float64)
+
+    # 用三角基对齐符号与手性（确保头→尾行波 dΦ > 0）
+    m = th.shape[1]
+    s_mid = (np.arange(m, dtype=np.float64) + 0.5) / float(m)
+    trig_c = np.cos(2.0 * np.pi * float(k_body) * s_mid)
+    trig_s = np.sin(2.0 * np.pi * float(k_body) * s_mid)
+    if float(np.dot(e2, trig_s)) < 0.0:
+        e2 = -e2
+    if float(np.dot(e1, trig_c)) < 0.0 and abs(float(np.dot(e1, trig_c))) >= abs(float(np.dot(e1, trig_s))):
+        e1 = -e1
+    return e1, e2

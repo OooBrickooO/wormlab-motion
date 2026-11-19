@@ -1,6 +1,8 @@
 """02 §2–§4: 掩码预处理、小虫 ROI 放大、填洞、端帽延伸、33 点中心线重采样与平滑外轮廓提取。"""
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 import scipy.ndimage
@@ -11,6 +13,38 @@ from wormlab.geometry import polyline_length, resample_polyline
 from wormlab.schemas import N_DENSE, Pose, Quality
 
 from .skeleton import extract_skeleton_path
+
+
+def _compute_shape_moments(mask: np.ndarray) -> tuple[float, float, float, float]:
+    """从二值前景计算等效椭圆长短轴比 b/a、偏心率、主轴角、沿短轴 3 阶标准化偏度。
+
+    特点：完全免骨架，对 10~60px 极小虫与 C 形弯曲高度稳定（08_SPEC Workstream A）。
+    """
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 6:
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    dx = xs.astype(np.float64) - float(xs.mean())
+    dy = ys.astype(np.float64) - float(ys.mean())
+    cxx = float(np.mean(dx * dx))
+    cyy = float(np.mean(dy * dy))
+    cxy = float(np.mean(dx * dy))
+
+    tr = cxx + cyy
+    det_term = math.sqrt(max(0.0, (cxx - cyy) ** 2 + 4.0 * cxy * cxy))
+    lam1 = max(1e-6, 0.5 * (tr + det_term))   # 长轴方差
+    lam2 = max(1e-6, 0.5 * (tr - det_term))   # 短轴方差
+    aspect = float(math.sqrt(lam2 / lam1))    # b / a ∈ (0, 1]：直虫≈0.15~0.30，C弯跃升至 0.45~0.85
+    ecc = float(math.sqrt(max(0.0, 1.0 - lam2 / lam1)))
+    angle = float(0.5 * math.atan2(2.0 * cxy, cxx - cyy))  # 主轴角 ∈ [-π/2, π/2]
+
+    # 沿短轴方向 v_minor = (-sin(angle), cos(angle)) 投影计算 3 阶标准化偏度
+    # 物理意义：C 形弧的质心偏向凹侧，导致短轴投影呈显著非对称偏态；
+    # 符号受主轴 ±π 不定性影响，后续在时间轴上对 angle 做 unwrap(2*angle)/2 即可得到连续带符号弯向
+    v_min_x, v_min_y = -math.sin(angle), math.cos(angle)
+    proj_minor = dx * v_min_x + dy * v_min_y
+    std_minor = math.sqrt(lam2)
+    skew_minor = float(np.mean(proj_minor ** 3) / (std_minor ** 3 + 1e-9))
+    return aspect, ecc, angle, skew_minor
 
 
 def _missing_pose(flags: set[str], area: float = 0.0) -> Pose:
@@ -244,6 +278,9 @@ def extract_pose(
 
         contour = _extract_smooth_contour(m_main, origin)
 
+        # 免骨架形状描述子：即使在骨架回退 (fallback PCA) 路径也必须填充
+        ell_aspect, ell_ecc, ell_angle, ell_skew_minor = _compute_shape_moments(m_main)
+
         return Pose(
             dense=dense_global,
             length=float(length_px),
@@ -254,6 +291,10 @@ def extract_pose(
             flags=frozenset(flags),
             contour=contour,
             branch_ratio=float(branch_ratio),
+            ell_aspect=ell_aspect,
+            ell_ecc=ell_ecc,
+            ell_angle=ell_angle,
+            ell_skew_minor=ell_skew_minor,
         )
     except Exception as exc:  # noqa: BLE001
         import logging

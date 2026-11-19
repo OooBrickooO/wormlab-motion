@@ -129,6 +129,13 @@ class TrackingCfg:
 @dataclass(frozen=True)
 class MaskRefineCfg:
     enabled: bool = False
+    use_bg_sub: bool = True          # 优先使用原图静态中值背景差分
+    prior_dilate_px: int = 8         # YOLO 掩码向外膨胀半径（作为空间先验，不再做严格交集）
+    bg_mad_k: float = 3.5            # 背景差分自适应阈值系数: median + k * MAD
+    bg_min_diff: int = 8             # 最小灰度差下限，抑制平坦背景噪声
+    min_iou_fallback: float = 0.25   # 允许比旧版 0.70 更宽松（因旧糊掩码本身偏胖/缺凹槽）
+    area_ratio_lo: float = 0.35      # 精修后允许变瘦（去掉糊膨胀外圈），但不允许空洞碎裂
+    area_ratio_hi: float = 1.60
 
 
 @dataclass(frozen=True)
@@ -166,6 +173,10 @@ class WaveCfg:
     eps_min: float = 0.40
     post_ratio_min: float = 0.35
     amp_post_min: float = 0.10
+    # 角动量门限参数（gate_mode 默认 "eps" 保持 default.yaml 兼容；crawl_agar.yaml 切换为 "angular_momentum"）
+    gate_mode: str = "eps"             # "eps" | "angular_momentum" | "hybrid"
+    coherence_min: float = 0.55        # 行波方向一致性阈值 |ΣLz| / Σ|Lz|
+    omega_min_rad_s: float = 0.35      # 最低加权角速度 (rad/s) ≈ 0.055 Hz，放行慢速爬行同时挡住静止漂移
 
 
 @dataclass(frozen=True)
@@ -181,6 +192,8 @@ class SRunCfg:
     bridge_gap_s: float = 0.0
     adaptive_k_body: bool = False
     eof_tail_frac: float | None = None
+    phase_bridge_s: float = 0.45       # freeze() 短暂掉出 <= 此秒数恢复时，若顺向且跳变 < 0.65π 则接续相位而非清空
+    use_path_disp: bool = True         # True: 沿中段切线逐帧积分路径前进位移；False: 旧版首尾直线弦投影
 
 
 @dataclass(frozen=True)
@@ -188,6 +201,13 @@ class SwingCfg:
     enabled: bool = False
     bend_high: float = 0.9
     min_flip_interval_s: float = 0.08
+    gap_hold_s: float = 0.35               # 独立于 s_run.gap_hold_s！
+    c_smooth_s: float = 0.07               # 在标量 c(t) 域平滑，而非在 (x, y) 坐标域平滑
+    shape_fallback_enabled: bool = True    # 开启免骨架椭圆/偏度双轨计数
+    shape_min_len_px: float = 55.0         # 中位体长低于此值自动启用免骨架主轨
+    shape_bad_ratio_thresh: float = 0.15   # 骨架 BAD 率高于此值自动启用免骨架主轨
+    shape_aspect_prom: float = 0.06        # b/a 带通波峰最小突出度
+    shape_motion_min: float = 1.5          # 最小 ROI 帧间灰度变化，过滤静态卷虫
 
 
 @dataclass(frozen=True)
@@ -199,6 +219,8 @@ class TurnCfg:
     cooldown_s: float = 2.5
     max_curl_s: float = 2.0  # CURL 状态最大驻留秒数，超时自动释放回 EXT，防止永久锁死 S 计数
     min_peak_c_rad: float = 0.85  # CURL 期间需至少达到的 |c| 弯曲度，区分真实 C 弯与掩码残缺缩短
+    R_c_enter: float | None = None    # C 形弯触发舒展比上限（如 0.76，对应 ~145°~180° 标准 C 形）
+    c_enter_rad: float | None = None  # 与 R_c_enter 联合使用（如 1.65 rad），需同时满足才触发 C 弯
 
 
 @dataclass(frozen=True)

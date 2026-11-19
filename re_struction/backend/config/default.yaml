@@ -103,6 +103,13 @@ pose:
   reorient_gap_s: 1.0
   mask_refine:
     enabled: false
+    use_bg_sub: true
+    prior_dilate_px: 8
+    bg_mad_k: 3.5
+    bg_min_diff: 8
+    min_iou_fallback: 0.25
+    area_ratio_lo: 0.35
+    area_ratio_hi: 1.60
 
 kinematics:
   smooth_s: 0.17
@@ -116,6 +123,9 @@ kinematics:
     eps_min: 0.40
     post_ratio_min: 0.35
     amp_post_min: 0.10
+    gate_mode: "eps"
+    coherence_min: 0.55
+    omega_min_rad_s: 0.35
   s_run:
     enabled: true
     dir_lock_rad: 0.8
@@ -123,10 +133,19 @@ kinematics:
     reverse_disp_ratio: 0.03
     min_disp_ratio: 0.10
     gap_hold_s: 0.30
+    phase_bridge_s: 0.45
+    use_path_disp: true
   swing:
     enabled: false
     bend_high: 0.9
     min_flip_interval_s: 0.08
+    gap_hold_s: 0.35
+    c_smooth_s: 0.07
+    shape_fallback_enabled: true
+    shape_min_len_px: 55.0
+    shape_bad_ratio_thresh: 0.15
+    shape_aspect_prom: 0.06
+    shape_motion_min: 1.5
   turn:
     enabled: true
     R_enter: 0.55
@@ -135,6 +154,8 @@ kinematics:
     cooldown_s: 2.5
     max_curl_s: 2.0
     min_peak_c_rad: 0.85
+    R_c_enter: null
+    c_enter_rad: null
   dc_remove_window_s: 5.0
   static_speed_bls: 0.03
   static_amp_rad: 0.08

@@ -40,8 +40,24 @@ class CacheWriter:
         self._flags: list[int] = []
         self._contours: list[np.ndarray] = []
         self._contour_offsets: list[int] = [0]
+        self._ell_aspect: list[float] = []
+        self._ell_ecc: list[float] = []
+        self._ell_angle: list[float] = []
+        self._ell_skew_minor: list[float] = []
+        self._roi_motion: list[float] = []
         self._user_labels: dict[str, str] = {}
         self._head_kpt_idx: dict[str, int] = {}
+
+    @staticmethod
+    def _shape_field(pose: Pose | None, name: str) -> float:
+        """读取免骨架形状描述子字段；pose 缺失或字段非有限值时统一写 NaN。"""
+        if pose is None:
+            return float("nan")
+        try:
+            v = float(getattr(pose, name))
+        except Exception:  # noqa: BLE001
+            return float("nan")
+        return v if np.isfinite(v) else float("nan")
 
     def append(self, frame_idx: int, track_out: TrackOut, pose: Pose | None) -> None:
         self._frame_idx.append(int(frame_idx))
@@ -84,6 +100,12 @@ class CacheWriter:
         else:
             self._contour_offsets.append(self._contour_offsets[-1])
 
+        self._ell_aspect.append(self._shape_field(pose, "ell_aspect"))
+        self._ell_ecc.append(self._shape_field(pose, "ell_ecc"))
+        self._ell_angle.append(self._shape_field(pose, "ell_angle"))
+        self._ell_skew_minor.append(self._shape_field(pose, "ell_skew_minor"))
+        self._roi_motion.append(self._shape_field(pose, "roi_motion"))
+
     def close(self, meta: dict[str, Any]) -> Path:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         m = len(self._frame_idx)
@@ -120,10 +142,15 @@ class CacheWriter:
             flags=np.array(self._flags, dtype=np.uint16),
             contour_xy=contour_xy,
             contour_off=np.array(self._contour_offsets, dtype=np.int64),
+            ell_aspect=np.array(self._ell_aspect, dtype=np.float32),
+            ell_ecc=np.array(self._ell_ecc, dtype=np.float32),
+            ell_angle=np.array(self._ell_angle, dtype=np.float32),
+            ell_skew_minor=np.array(self._ell_skew_minor, dtype=np.float32),
+            roi_motion=np.array(self._roi_motion, dtype=np.float32),
         )
 
         full_meta = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "user_labels": {**self._user_labels, **(meta.get("user_labels") or {})},
             "head_kpt_idx": {**self._head_kpt_idx, **(meta.get("head_kpt_idx") or {})},
@@ -170,6 +197,21 @@ class CacheReader:
             flags = data["flags"]
             contour_xy = data["contour_xy"]
             contour_off = data["contour_off"]
+            # 旧版 tracks.npz 可能不含免骨架形状描述子列：统一回退为 NaN，保证向后兼容
+            m_len = len(frame_idx)
+            ell_aspect = (
+                data["ell_aspect"]
+                if "ell_aspect" in data
+                else np.full(m_len, np.nan, dtype=np.float32)
+            )
+            ell_ecc = data["ell_ecc"] if "ell_ecc" in data else np.full(m_len, np.nan, dtype=np.float32)
+            ell_angle = data["ell_angle"] if "ell_angle" in data else np.full(m_len, np.nan, dtype=np.float32)
+            ell_skew_minor = (
+                data["ell_skew_minor"]
+                if "ell_skew_minor" in data
+                else np.full(m_len, np.nan, dtype=np.float32)
+            )
+            roi_motion = data["roi_motion"] if "roi_motion" in data else np.full(m_len, np.nan, dtype=np.float32)
 
         m = len(frame_idx)
         for i in range(m):
@@ -199,6 +241,11 @@ class CacheReader:
                     quality=q_enum,
                     flags=decode_flags(int(flags[i])),
                     contour=cnt,
+                    ell_aspect=float(ell_aspect[i]),
+                    ell_ecc=float(ell_ecc[i]),
+                    ell_angle=float(ell_angle[i]),
+                    ell_skew_minor=float(ell_skew_minor[i]),
+                    roi_motion=float(roi_motion[i]),
                 )
 
             if pose_obj is not None and pose_obj.dense is not None:

@@ -1,10 +1,17 @@
-"""T16 / T32 (07 §7): 运动学超参数网格搜索与留一视频交叉验证工具 (tune.py)。
+"""T16 / T32 (07 §7 + 08_SPEC Workstream D): 运动学超参数网格搜索与留一视频交叉验证工具 (tune.py)。
 
-支持两类数据集:
+08_SPEC S7 修复：旧版 `_eval_fast` 与 `KinematicsEngine` 严重脱节（缺 s_run.k_body、freeze、
+slowdown_hold_s、settle_partial、deep_coil_R、角动量门限）。现对每组候选超参**直接调用
+`KinematicsEngine.run_postprocessed(...)`**（与 PassB 生产管线完全同一口径），不再维护失真的
+快速副本。
+
+支持:
 - `--dataset synth`: 内置 4 条合成序列快速搜索 (默认向后兼容)
-- `--dataset real`: 读取 `data/cache/{10x,1.6x-1,1.6x-3}` 缓存与 `benchmarks/labels/` 真值，
-  预计算滑窗特征与行波统计量后做全网格 + 留一视频交叉验证 (LOVO CV)，并输出
-  `benchmarks/tuned_<profile>.yaml`（不自动修改 `default.yaml`）。
+- `--dataset real --profile crawl_agar`: 读取 `data/cache/{10x,1.6x-1,1.6x-3}` 缓存与
+  `benchmarks/labels/` 真值，全网格 + 留一视频交叉验证 (LOVO CV)
+- `--dataset real --profile swim_liquid`: 读取 `data/cache/{Swim-3,Swim-4}` 缓存，
+  网格搜索 swing.bend_high / shape_aspect_prom / shape_motion_min / min_flip_interval_s
+输出 `benchmarks/tuned_<profile>.yaml`（不自动修改 default.yaml）。
 """
 from __future__ import annotations
 
@@ -27,13 +34,8 @@ for p in (str(RE_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, p)
 
 from tools.make_synthetic import Scn, make_series  # noqa: E402
-from wormlab.config import load_config  # noqa: E402
-from wormlab.kinematics import KinematicsEngine  # noqa: E402
-from wormlab.kinematics.features import compute_features  # noqa: E402
-from wormlab.kinematics.modes import modal_phase  # noqa: E402
-from wormlab.kinematics.s_runs import SRunCounter  # noqa: E402
-from wormlab.kinematics.turns import TurnCounter  # noqa: E402
-from wormlab.kinematics.wave import GateResult, wave_gate  # noqa: E402
+from wormlab.config import KinCfg, load_config  # noqa: E402
+from wormlab.kinematics import KinematicsEngine, TrackReport  # noqa: E402
 from wormlab.pipeline.cache import load_cache  # noqa: E402
 from wormlab.pipeline.late_entry import partition_tracks_by_uid, select_primary_uid_per_track_id  # noqa: E402
 from wormlab.schemas import Pose, Quality  # noqa: E402
@@ -42,23 +44,18 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 log = logging.getLogger("tune")
 
 REAL_CRAWL_VIDEOS = ["10x", "1.6x-1", "1.6x-3"]
+REAL_SWIM_VIDEOS = ["Swim-3", "Swim-4"]
 
 
 @dataclass
-class _PrecomputedCrawlTrack:
+class _TrackData:
+    """单条轨迹的原始姿态序列 + 真值（评测时直接喂给 run_postprocessed）。"""
+
     video_id: str
     label: str
     gt: int
     fps: float
-    r_med: np.ndarray
-    eps: np.ndarray
-    amp_ant: np.ndarray
-    amp_post: np.ndarray
-    phi: list[float | None]
-    center: list[np.ndarray | None]
-    u: list[np.ndarray | None]
-    L_ref: np.ndarray
-    turn_or_bad: np.ndarray
+    poses: list[Pose | None]
 
 
 def _iou_xyxy(a: list[float] | np.ndarray, b: list[float] | np.ndarray) -> float:
@@ -71,8 +68,8 @@ def _iou_xyxy(a: list[float] | np.ndarray, b: list[float] | np.ndarray) -> float
     return inter / union if union > 0 else 0.0
 
 
-def _build_synth_crawl_dataset() -> list[tuple[str, list[Pose], float, int]]:
-    dataset: list[tuple[str, list[Pose], float, int]] = []
+def _build_synth_crawl_dataset() -> list[_TrackData]:
+    dataset: list[_TrackData] = []
     for kind, gt in [("crawl_fwd", 10), ("crawl_bwd", 0), ("head_wiggle", 0), ("treadmill", 0)]:
         d_seq, _ = make_series(Scn(kind=kind, duration_s=20.0, fps=30.0))
         poses = [
@@ -86,106 +83,53 @@ def _build_synth_crawl_dataset() -> list[tuple[str, list[Pose], float, int]]:
             )
             for d in d_seq
         ]
-        dataset.append((kind, poses, 30.0, gt))
+        dataset.append(_TrackData(video_id="synth", label=kind, gt=gt, fps=30.0, poses=poses))
     return dataset
 
 
-def _precompute_track(
-    video_id: str,
-    label: str,
-    gt: int,
-    poses_seq: list[Pose | None],
-    fps: float,
-    align_head: bool,
-) -> _PrecomputedCrawlTrack:
+def _align_head_flip(poses_seq: list[Pose | None]) -> list[Pose | None]:
+    """依据观测特征的整体前进方向，将首帧头尾对齐（模拟首帧人工头标效果）。"""
     cfg = load_config("crawl_agar").kinematics
+    from wormlab.kinematics.features import compute_features
 
-    if align_head:
-        obs_feats = [
-            compute_features(p.dense, cfg)
-            for p in poses_seq
-            if p is not None and p.dense is not None and p.quality != Quality.BAD
-        ]
-        obs_feats = [f for f in obs_feats if f is not None]
-        if len(obs_feats) >= 2:
-            dC = obs_feats[-1].center - obs_feats[0].center
-            u_m = np.mean([f.u for f in obs_feats[: min(150, len(obs_feats))]], axis=0)
-            if float(np.dot(dC, u_m)) < 0.0:
-                poses_seq = [
-                    None
-                    if p is None or p.dense is None
-                    else Pose(
-                        dense=p.dense[::-1].copy(),
-                        length=p.length,
-                        chord=p.chord,
-                        width=p.width,
-                        area=p.area,
-                        quality=p.quality,
-                        flags=p.flags,
-                    )
-                    for p in poses_seq
-                ]
-
-    eng = KinematicsEngine(cfg=cfg, fps=fps, c_unit="cycle")
-    n = len(poses_seq)
-    for idx, p in enumerate(poses_seq):
-        eng.valid_dense.append(p.dense if (p is not None and p.quality != Quality.BAD) else None)
-    for i in range(n):
-        eng._compute_feat_at(i)
-
-    turn = TurnCounter(cfg.turn, fps=fps)
-    r_med = np.zeros(n, dtype=np.float64)
-    eps = np.zeros(n, dtype=np.float64)
-    amp_ant = np.zeros(n, dtype=np.float64)
-    amp_post = np.zeros(n, dtype=np.float64)
-    phi: list[float | None] = [None] * n
-    center: list[np.ndarray | None] = [None] * n
-    u: list[np.ndarray | None] = [None] * n
-    L_ref = np.full(n, 120.0, dtype=np.float64)
-    turn_or_bad = np.zeros(n, dtype=bool)
-
-    for i in range(n):
-        f = eng.feats[i]
-        lo = max(0, i - eng.h_wave)
-        hi = min(n, i + eng.h_wave + 1)
-        win = eng.feats[lo:hi]
-        g: GateResult = wave_gate(win, cfg.wave, expected_len=len(win)) if f is not None else GateResult.off()
-        r_med[i] = g.r_med
-        eps[i] = g.eps
-        amp_ant[i] = g.amp_ant
-        amp_post[i] = g.amp_post
-        L_ref[i] = eng._L_ref(i)
-        turn.step(i, f.R if f is not None else 0.0, valid=(f is not None))
-        turn_or_bad[i] = bool(turn.in_curl or eng._bad_too_long(i))
-        if f is not None:
-            phi[i] = modal_phase(f.a1, f.a2)
-            center[i] = f.center
-            u[i] = f.u
-
-    return _PrecomputedCrawlTrack(
-        video_id=video_id,
-        label=label,
-        gt=gt,
-        fps=fps,
-        r_med=r_med,
-        eps=eps,
-        amp_ant=amp_ant,
-        amp_post=amp_post,
-        phi=phi,
-        center=center,
-        u=u,
-        L_ref=L_ref,
-        turn_or_bad=turn_or_bad,
-    )
+    obs_feats = [
+        compute_features(p.dense, cfg)
+        for p in poses_seq
+        if p is not None and p.dense is not None and p.quality != Quality.BAD
+    ]
+    obs_feats = [f for f in obs_feats if f is not None]
+    if len(obs_feats) < 2:
+        return poses_seq
+    dC = obs_feats[-1].center - obs_feats[0].center
+    u_m = np.mean([f.u for f in obs_feats[: min(150, len(obs_feats))]], axis=0)
+    if float(np.dot(dC, u_m)) >= 0.0:
+        return poses_seq
+    return [
+        None
+        if p is None or p.dense is None
+        else Pose(
+            dense=p.dense[::-1].copy(),
+            length=p.length,
+            chord=p.chord,
+            width=p.width,
+            area=p.area,
+            quality=p.quality,
+            flags=p.flags,
+        )
+        for p in poses_seq
+    ]
 
 
-def _build_real_crawl_dataset(align_head: bool) -> list[_PrecomputedCrawlTrack]:
-    cfg0 = load_config("crawl_agar")
-    tracks: list[_PrecomputedCrawlTrack] = []
-    for vid in REAL_CRAWL_VIDEOS:
+def _load_real_tracks(profile: str, videos: list[str], align_head: bool) -> list[_TrackData]:
+    """从 data/cache/<vid>/tracks.npz + benchmarks/labels/<vid>.json 构建评测轨迹集。"""
+    cfg0 = load_config(profile)
+    tracks: list[_TrackData] = []
+    for vid in videos:
         cdir = RE_ROOT / "data" / "cache" / vid
         if not (cdir / "tracks.npz").exists():
-            raise FileNotFoundError(f"缺少缓存 {cdir / 'tracks.npz'}，请先运行 eval_benchmark.py --rerun-pass-a")
+            raise FileNotFoundError(
+                f"缺少缓存 {cdir / 'tracks.npz'}，请先运行 eval_benchmark.py --rerun-pass-a"
+            )
         meta, recs = load_cache(cdir)
         fps = float(meta["fps"])
         T = int(meta["total_frames"])
@@ -212,45 +156,41 @@ def _build_real_crawl_dataset(align_head: bool) -> list[_PrecomputedCrawlTrack]:
             for r in sel[best].records:
                 if not r.is_ghost and 0 <= r.frame_idx < T:
                     seq[r.frame_idx] = r.pose
-            tracks.append(_precompute_track(vid, str(a["label"]), int(a["gt"]), seq, fps, align_head=align_head))
+            if align_head:
+                seq = _align_head_flip(seq)
+            tracks.append(_TrackData(video_id=vid, label=str(a["label"]), gt=int(a["gt"]), fps=fps, poses=seq))
     return tracks
 
 
-def _eval_fast(track: _PrecomputedCrawlTrack, kcfg: Any) -> int:
-    w = kcfg.wave
-    s_counter = SRunCounter(kcfg.s_run, fps=track.fps)
-    n = len(track.phi)
-    r_m = float(w.r_min)
-    e_m = float(w.eps_min)
-    pr_m = float(w.post_ratio_min)
-    ap_m = float(w.amp_post_min)
-
-    for i in range(n):
-        if track.turn_or_bad[i]:
-            s_counter.force_abort("curl_or_bad")
-        gate_ok = bool(
-            track.phi[i] is not None
-            and track.r_med[i] >= r_m
-            and track.eps[i] >= e_m
-            and track.amp_post[i] >= pr_m * track.amp_ant[i]
-            and track.amp_post[i] >= ap_m
-        )
-        s_counter.step(
-            i=i,
-            gate_ok=gate_ok,
-            phi=track.phi[i],
-            center=track.center[i],
-            u=track.u[i],
-            L_ref=float(track.L_ref[i]),
-        )
-    return int(s_counter.s_count)
+def _eval_postprocessed(track: _TrackData, kcfg: KinCfg, c_unit: str = "cycle") -> TrackReport:
+    """直接调用生产管线同款 run_postprocessed（含桥接 / 自适应 k / 免骨架双轨 / 尾数结算）。"""
+    rep, _pfs = KinematicsEngine.run_postprocessed(
+        track.poses,
+        fps=track.fps,
+        cfg=kcfg,
+        c_unit=c_unit,
+    )
+    return rep
 
 
 def _crawl_pass(pred: int, gt: int) -> bool:
     return abs(pred - gt) <= 1 if gt <= 5 else abs(pred - gt) <= max(2, 0.2 * float(gt))
 
 
-def _loss(preds: list[int], tracks: list[_PrecomputedCrawlTrack], idxs: list[int]) -> tuple[float, int, float]:
+def _crawl_pred(rep: TrackReport) -> int:
+    return int(rep.s_count)
+
+
+def _swim_pred(rep: TrackReport) -> tuple[int, int]:
+    return int(rep.c_cycles), int(rep.c_bends)
+
+
+def _swim_pass(c_cycles: int, c_bends: int, gt: int) -> bool:
+    err = min(abs(c_cycles - gt), abs(c_bends - gt))
+    return err <= max(2.0, 0.15 * float(gt))
+
+
+def _crawl_loss(preds: list[int], tracks: list[_TrackData], idxs: list[int]) -> tuple[float, int, float]:
     mae_sum = 0.0
     rel_sum = 0.0
     zero_pen = 0.0
@@ -266,17 +206,32 @@ def _loss(preds: list[int], tracks: list[_PrecomputedCrawlTrack], idxs: list[int
     return rel_sum + zero_pen, passes, mae_sum / float(max(1, len(idxs)))
 
 
-def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
-    tracks = _build_real_crawl_dataset(align_head=align_head)
-    log.info("已加载 %d 条真实爬行轨迹 (align_head=%s)", len(tracks), align_head)
-    grid = {
-        "wave.r_min": [0.12, 0.15, 0.20],
-        "wave.eps_min": [0.18, 0.20, 0.22],
-        "wave.post_ratio_min": [0.35],
-        "s_run.gap_hold_s": [0.8, 0.9],
-        "s_run.min_disp_ratio": [0.04, 0.05],
-        "s_run.dir_lock_rad": [0.8],
-    }
+def _swim_loss(
+    preds: list[tuple[int, int]],
+    tracks: list[_TrackData],
+    idxs: list[int],
+) -> tuple[float, int, float]:
+    mae_sum = 0.0
+    rel_sum = 0.0
+    zero_pen = 0.0
+    passes = 0
+    for i in idxs:
+        cyc, bnd = preds[i]
+        g = tracks[i].gt
+        err = min(abs(cyc - g), abs(bnd - g))
+        mae_sum += err
+        rel_sum += err / float(max(1, g))
+        if g == 0 and min(cyc, bnd) > 1:
+            zero_pen += 5.0 * (min(cyc, bnd) - 1)
+        if _swim_pass(cyc, bnd, g):
+            passes += 1
+    return rel_sum + zero_pen, passes, mae_sum / float(max(1, len(idxs)))
+
+
+def _grid_eval_crawl(
+    tracks: list[_TrackData],
+    grid: dict[str, list[Any]],
+) -> list[tuple[dict[str, Any], list[int]]]:
     keys = list(grid)
     base_kcfg = load_config("crawl_agar").kinematics
     candidates: list[tuple[dict[str, Any], list[int]]] = []
@@ -290,12 +245,29 @@ def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
             wave=replace(base_kcfg.wave, **ov.get("wave", {})),
             s_run=replace(base_kcfg.s_run, **ov.get("s_run", {})),
         )
-        preds = [_eval_fast(t, kcfg) for t in tracks]
+        preds = [_crawl_pred(_eval_postprocessed(t, kcfg)) for t in tracks]
         candidates.append((ov, preds))
+    return candidates
+
+
+def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
+    """真实爬行视频调参：与生产引擎完全同口径的 run_postprocessed 网格搜索 + LOVO CV。"""
+    tracks = _load_real_tracks("crawl_agar", REAL_CRAWL_VIDEOS, align_head=align_head)
+    log.info("已加载 %d 条真实爬行轨迹 (align_head=%s)", len(tracks), align_head)
+
+    grid = {
+        "wave.r_min": [0.12, 0.14, 0.18],
+        "wave.coherence_min": [0.50, 0.55, 0.60],
+        "wave.omega_min_rad_s": [0.30, 0.40],
+        "s_run.gap_hold_s": [0.8, 0.9],
+        "s_run.min_disp_ratio": [0.04, 0.05, 0.08],
+        "s_run.phase_bridge_s": [0.35, 0.45],
+    }
+    candidates = _grid_eval_crawl(tracks, grid)
 
     all_idx = list(range(len(tracks)))
-    best_ov, best_preds = min(candidates, key=lambda c: _loss(c[1], tracks, all_idx)[0])
-    _, best_pass, best_mae = _loss(best_preds, tracks, all_idx)
+    best_ov, best_preds = min(candidates, key=lambda c: _crawl_loss(c[1], tracks, all_idx)[0])
+    _, best_pass, best_mae = _crawl_loss(best_preds, tracks, all_idx)
 
     cv_pass = 0
     cv_n = 0
@@ -303,8 +275,15 @@ def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
     for hold in REAL_CRAWL_VIDEOS:
         tr = [i for i, t in enumerate(tracks) if t.video_id != hold]
         te = [i for i, t in enumerate(tracks) if t.video_id == hold]
-        ov_tr, preds_tr = min(candidates, key=lambda c: _loss(c[1], tracks, tr)[0])
-        _, k_te, mae_te = _loss(preds_tr, tracks, te)
+        ov_tr, _ = min(candidates, key=lambda c: _crawl_loss(c[1], tracks, tr)[0])
+        # 用训练集最优参数重新评测留出集
+        kcfg = replace(
+            load_config("crawl_agar").kinematics,
+            wave=replace(load_config("crawl_agar").kinematics.wave, **ov_tr.get("wave", {})),
+            s_run=replace(load_config("crawl_agar").kinematics.s_run, **ov_tr.get("s_run", {})),
+        )
+        preds_te = [_crawl_pred(_eval_postprocessed(tracks[i], kcfg)) for i in te]
+        _, k_te, mae_te = _crawl_loss(preds_te, tracks, te)
         cv_pass += k_te
         cv_n += len(te)
         lovo_details[hold] = f"{k_te}/{len(te)} pass (MAE={mae_te:.2f})"
@@ -334,6 +313,7 @@ def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
             "lovo_pass": f"{cv_pass}/{cv_n}",
             "lovo_by_video": lovo_details,
             "gt_zero_preds": zeros,
+            "engine": "KinematicsEngine.run_postprocessed",
         },
     }
     out_yaml.parent.mkdir(parents=True, exist_ok=True)
@@ -341,7 +321,61 @@ def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
     return doc
 
 
-def tune_crawl(dataset: list[tuple[str, list[Pose], float, int]], out_yaml: Path) -> dict[str, Any]:
+def tune_real_swim(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
+    """真实游泳视频调参：网格搜索 swing 阈值（骨架迟滞 + 免骨架双轨均由生产引擎统一执行）。"""
+    tracks = _load_real_tracks("swim_liquid", REAL_SWIM_VIDEOS, align_head=align_head)
+    log.info("已加载 %d 条真实游泳轨迹 (align_head=%s)", len(tracks), align_head)
+
+    base_kcfg = load_config("swim_liquid").kinematics
+    grid = {
+        "bend_high": [0.65, 0.75, 0.85],
+        "shape_aspect_prom": [0.04, 0.06, 0.08],
+        "shape_motion_min": [1.0, 1.5, 2.0],
+        "min_flip_interval_s": [0.06, 0.08, 0.10],
+    }
+    keys = list(grid)
+    candidates: list[tuple[dict[str, Any], list[tuple[int, int]]]] = []
+    for vals in itertools.product(*(grid[k] for k in keys)):
+        ov = dict(zip(keys, vals))
+        kcfg = replace(base_kcfg, swing=replace(base_kcfg.swing, **ov))
+        preds = [_swim_pred(_eval_postprocessed(t, kcfg, c_unit="cycle")) for t in tracks]
+        candidates.append((ov, preds))
+
+    all_idx = list(range(len(tracks)))
+    best_ov, best_preds = min(candidates, key=lambda c: _swim_loss(c[1], tracks, all_idx)[0])
+    _, best_pass, best_mae = _swim_loss(best_preds, tracks, all_idx)
+
+    zeros = [best_preds[i] for i, t in enumerate(tracks) if t.gt == 0]
+    log.info(
+        "最优真实游泳参数 (align_head=%s): pass=%d/%d (%.1f%%), MAE=%.2f, zeros=%s | %s",
+        align_head,
+        best_pass,
+        len(tracks),
+        100.0 * best_pass / max(1, len(tracks)),
+        best_mae,
+        zeros,
+        json.dumps(best_ov),
+    )
+
+    doc = {
+        "kinematics": {"swing": best_ov},
+        "_meta": {
+            "align_head": align_head,
+            "videos": REAL_SWIM_VIDEOS,
+            "tracks": len(tracks),
+            "in_sample_pass": f"{best_pass}/{len(tracks)}",
+            "in_sample_mae": round(best_mae, 3),
+            "gt_zero_preds": zeros,
+            "engine": "KinematicsEngine.run_postprocessed",
+        },
+    }
+    out_yaml.parent.mkdir(parents=True, exist_ok=True)
+    out_yaml.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return doc
+
+
+def tune_crawl(dataset: list[_TrackData], out_yaml: Path) -> dict[str, Any]:
+    """合成序列快速网格搜索（向后兼容入口，同样走生产引擎 run_postprocessed）。"""
     r_mins = [0.20, 0.25, 0.30]
     eps_mins = [0.35, 0.40, 0.50]
     disp_ratios = [0.08, 0.10, 0.15]
@@ -360,12 +394,12 @@ def tune_crawl(dataset: list[tuple[str, list[Pose], float, int]], out_yaml: Path
         kcfg = load_config("crawl_agar", overrides=overrides).kinematics
         loss = 0.0
         zero_violated = False
-        for _, poses, fps, gt in dataset:
-            rep, _ = KinematicsEngine.run(poses, fps=fps, cfg=kcfg)
-            if gt == 0 and rep.s_count > 1:
+        for track in dataset:
+            rep = _eval_postprocessed(track, kcfg)
+            if track.gt == 0 and rep.s_count > 1:
                 zero_violated = True
                 break
-            loss += abs(rep.s_count - gt) / float(max(1, gt))
+            loss += abs(rep.s_count - track.gt) / float(max(1, track.gt))
         if not zero_violated and loss < best_loss:
             best_loss = loss
             best_params = overrides
@@ -377,8 +411,8 @@ def tune_crawl(dataset: list[tuple[str, list[Pose], float, int]], out_yaml: Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="网格搜索调参工具")
-    parser.add_argument("--profile", type=str, default="crawl_agar")
+    parser = argparse.ArgumentParser(description="网格搜索调参工具（与生产引擎 run_postprocessed 同口径）")
+    parser.add_argument("--profile", type=str, default="crawl_agar", choices=["crawl_agar", "swim_liquid"])
     parser.add_argument("--dataset", choices=["synth", "real"], default="synth")
     parser.add_argument("--raw-head", action="store_true", help="真实视频调参时不模拟首帧头部对齐")
     parser.add_argument("--out", type=str, default=None)
@@ -386,7 +420,10 @@ def main(argv: list[str] | None = None) -> int:
 
     out_path = Path(args.out) if args.out else (RE_ROOT / "benchmarks" / f"tuned_{args.profile}.yaml")
     if args.dataset == "real":
-        tune_real_crawl(out_path, align_head=not args.raw_head)
+        if args.profile == "swim_liquid":
+            tune_real_swim(out_path, align_head=not args.raw_head)
+        else:
+            tune_real_crawl(out_path, align_head=not args.raw_head)
     else:
         dataset = _build_synth_crawl_dataset()
         tune_crawl(dataset, out_path)

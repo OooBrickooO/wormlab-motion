@@ -1,4 +1,11 @@
-"""03 §3: 行波门限判别器 (wave_gate) —— 区分全身行波与驻波/原地抖动/仅头部试探。"""
+"""03 §3: 行波门限判别器 (wave_gate) —— 区分全身行波与驻波/原地抖动/仅头部试探。
+
+08_SPEC S2 升级：除原相平面圆度 ε 判据外，新增瞬时角动量 L_z = a1·ȧ2 − a2·ȧ1 的
+方向一致性 C_wave = |ΣLz| / Σ|Lz| 与加权角速度 ω̄ = ΣLz / Σr² 双判据：
+- 驻波 / 原地线性抖动：a1, a2 共线，L_z ≡ 0；
+- 行波（含慢速 0.15 Hz 或刚起步 0.5s 短爆发）：L_z 瞬时恒同号，短窗内一致性 ≈ 0.8–1.0。
+gate_mode: "eps"（旧版兼容默认）| "angular_momentum" | "hybrid"。
+"""
 from __future__ import annotations
 
 import math
@@ -20,16 +27,44 @@ class GateResult:
     r_med: float  # 模态幅度中位数 median(hypot(a1, a2))
     amp_ant: float  # 前半身切线角时间振荡幅度 (rad)
     amp_post: float  # 后半身切线角时间振荡幅度 (rad)
+    coherence: float = 0.0  # 角动量方向一致性 |ΣLz| / Σ|Lz| ∈ [0, 1]
+    mean_omega: float = 0.0  # r² 加权平均角速度 ΣLz / Σr² (rad/s，带符号)
 
     @staticmethod
     def off() -> GateResult:
         return GateResult(ok=False, eps=0.0, r_med=0.0, amp_ant=0.0, amp_post=0.0)
 
 
+def _angular_momentum_stats(window_feats: list[Feat | None], fps: float) -> tuple[float, float]:
+    """按原始时间索引计算角动量统计 (coherence, mean_omega)；尊重中间缺失间隔 dt_k。"""
+    valid_pairs = [(idx, f) for idx, f in enumerate(window_feats) if f is not None]
+    lz_list: list[float] = []
+    r2_list: list[float] = []
+    for (i0, f0), (i1, f1) in zip(valid_pairs[:-1], valid_pairs[1:]):
+        dt = float(i1 - i0) / max(1e-6, float(fps))
+        if dt <= 0.0 or dt > 0.35:
+            continue
+        a1_m = 0.5 * (float(f0.a1) + float(f1.a1))
+        a2_m = 0.5 * (float(f0.a2) + float(f1.a2))
+        da1 = (float(f1.a1) - float(f0.a1)) / dt
+        da2 = (float(f1.a2) - float(f0.a2)) / dt
+        lz_list.append(a1_m * da2 - a2_m * da1)
+        r2_list.append(a1_m * a1_m + a2_m * a2_m)
+
+    if not lz_list:
+        return 0.0, 0.0
+    lz_arr = np.asarray(lz_list, dtype=np.float64)
+    r2_arr = np.asarray(r2_list, dtype=np.float64)
+    coherence = float(abs(np.sum(lz_arr)) / (np.sum(np.abs(lz_arr)) + 1e-9))
+    mean_omega = float(np.sum(lz_arr) / (np.sum(r2_arr) + 1e-9))
+    return coherence, mean_omega
+
+
 def wave_gate(
     window_feats: list[Feat | None],
     cfg: WaveCfg,
     expected_len: int | None = None,
+    fps: float = 30.0,
 ) -> GateResult:
     """在滑窗特征列表上判定是否满足全身行波门限。
 
@@ -61,10 +96,30 @@ def wave_gate(
     amp_ant = float(math.sqrt(float(np.mean(np.var(th_mat[:, :half_seg], axis=0)))))
     amp_post = float(math.sqrt(float(np.mean(np.var(th_mat[:, half_seg:], axis=0)))))
 
-    ok = bool(
+    base_amp_ok = bool(
         r_med >= float(cfg.r_min)
-        and eps >= float(cfg.eps_min)
         and amp_post >= float(cfg.post_ratio_min) * amp_ant
         and amp_post >= float(cfg.amp_post_min)
     )
-    return GateResult(ok=ok, eps=eps, r_med=r_med, amp_ant=amp_ant, amp_post=amp_post)
+
+    coherence, mean_omega = _angular_momentum_stats(window_feats, fps)
+
+    mode = str(getattr(cfg, "gate_mode", "eps") or "eps")
+    if mode == "angular_momentum":
+        travel_ok = coherence >= float(cfg.coherence_min) and abs(mean_omega) >= float(cfg.omega_min_rad_s)
+    elif mode == "hybrid":
+        travel_ok = eps >= float(cfg.eps_min) or (
+            coherence >= float(cfg.coherence_min) and abs(mean_omega) >= float(cfg.omega_min_rad_s)
+        )
+    else:  # "eps"（默认，向后兼容）
+        travel_ok = eps >= float(cfg.eps_min)
+
+    return GateResult(
+        ok=bool(base_amp_ok and travel_ok),
+        eps=eps,
+        r_med=r_med,
+        amp_ant=amp_ant,
+        amp_post=amp_post,
+        coherence=coherence,
+        mean_omega=mean_omega,
+    )

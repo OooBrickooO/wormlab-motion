@@ -88,6 +88,12 @@ class Pose:
     flags: frozenset[str] = field(default_factory=frozenset)
     contour: np.ndarray | None = None  # (K, 2) float32 平滑外轮廓折线，K<=80
     branch_ratio: float = 0.0  # 骨架分支像素占比（供 PoseQualityJudge 使用）
+    # —— 免骨架形状描述子（全部带默认值，保证旧构造调用零破坏）——
+    ell_aspect: float = float("nan")      # 等效椭圆短长轴比 b / a ∈ (0, 1]，直虫小、C弯大
+    ell_ecc: float = float("nan")         # 偏心率 sqrt(1 - (b/a)^2) ∈ [0, 1)
+    ell_angle: float = float("nan")       # 主轴方向角 (rad) ∈ [-π/2, π/2)
+    ell_skew_minor: float = float("nan")  # 沿椭圆短轴的归一化 3 阶中心矩偏度（无需头尾即可指示 C 弯凸侧）
+    roi_motion: float = float("nan")      # ROI 帧间像素活跃度（区分"真 C 摆动"与"瘫痪僵卷"）
 
     @property
     def pts11(self) -> np.ndarray | None:

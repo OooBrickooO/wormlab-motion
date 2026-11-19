@@ -102,3 +102,63 @@ def test_cache_writer_reader_roundtrip(tmp_path: Path) -> None:
     selected, dropped = select_primary_uid_per_track_id(groups)
     assert set(selected.keys()) == {1, 2}
     assert dropped == []
+
+
+def test_shape_descriptor_roundtrip_and_legacy_npz(tmp_path: Path) -> None:
+    """08_SPEC Workstream A: 5 个免骨架形状字段无损往返；旧版缺列 .npz 自动回退 NaN。"""
+    writer = CacheWriter(tmp_path)
+    dense_0 = np.column_stack(
+        [np.linspace(100.0, 160.0, N_DENSE), np.linspace(200.0, 210.0, N_DENSE)]
+    ).astype(np.float32)
+    pose_0 = Pose(
+        dense=dense_0,
+        length=61.0,
+        chord=60.8,
+        width=6.5,
+        area=400.0,
+        quality=Quality.OK,
+        ell_aspect=0.42,
+        ell_ecc=0.91,
+        ell_angle=0.35,
+        ell_skew_minor=-0.87,
+        roi_motion=2.7,
+    )
+    to_0 = TrackOut(
+        track_id=1,
+        bbox=np.array([95.0, 195.0, 165.0, 215.0], dtype=np.float32),
+        det_idx=0,
+        is_ghost=False,
+        lost_frames=0,
+        confirmed=True,
+        user_label=None,
+        head_kpt_idx=None,
+        head_xy=None,
+        conf=0.9,
+        first_frame=0,
+        uid=1,
+    )
+    writer.append(frame_idx=0, track_out=to_0, pose=pose_0)
+    writer.close({"fps": 30.0, "width": 640, "height": 480, "total_frames": 2})
+
+    reader = CacheReader(tmp_path)
+    r0 = reader.frame_rows(0)[0]
+    assert r0.pose is not None
+    assert r0.pose.ell_aspect == np.float32(0.42).item() or abs(r0.pose.ell_aspect - 0.42) < 1e-6
+    assert abs(r0.pose.ell_ecc - 0.91) < 1e-6
+    assert abs(r0.pose.ell_angle - 0.35) < 1e-6
+    assert abs(r0.pose.ell_skew_minor - (-0.87)) < 1e-6
+    assert abs(r0.pose.roi_motion - 2.7) < 1e-6
+
+    # 旧版 tracks.npz（无 5 个形状列）-> CacheReader 自动填充 NaN 且不报错
+    npz_path = tmp_path / "tracks.npz"
+    with np.load(npz_path, allow_pickle=False) as data:
+        legacy = {k: data[k] for k in data.files if k not in {"ell_aspect", "ell_ecc", "ell_angle", "ell_skew_minor", "roi_motion"}}
+    np.savez_compressed(npz_path, **legacy)
+    reader_legacy = CacheReader(tmp_path)
+    rl = reader_legacy.frame_rows(0)[0]
+    assert rl.pose is not None
+    assert not np.isfinite(rl.pose.ell_aspect)
+    assert not np.isfinite(rl.pose.ell_ecc)
+    assert not np.isfinite(rl.pose.ell_angle)
+    assert not np.isfinite(rl.pose.ell_skew_minor)
+    assert not np.isfinite(rl.pose.roi_motion)

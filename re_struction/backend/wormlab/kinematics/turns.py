@@ -32,6 +32,10 @@ class TurnCounter:
         self.max_curl_frames = max(10, int(round(float(getattr(cfg, "max_curl_s", 2.0)) * float(fps))))
         self.min_peak_c_rad = float(getattr(cfg, "min_peak_c_rad", 0.85))
         self.gap_hold_frames = max(1, int(round(0.30 * float(fps))))
+        # C 形弯联合触发阈值（08_SPEC C1）：均匀圆弧 180° 半圆 R=2/π≈0.637，
+        # 单靠 R_enter≈0.58 需弯曲 >=196° 已是 Ω 环；R_c_enter + c_enter_rad 联合判定标准 145°~180° C 形
+        self.r_c_enter = getattr(cfg, "R_c_enter", None)
+        self.c_enter_rad = getattr(cfg, "c_enter_rad", None)
 
         self.state: str = "INIT"
         self.curl_start: int = 0
@@ -55,6 +59,13 @@ class TurnCounter:
         self.state = "EXT"
         self.peak_c_in_curl = 0.0
 
+    def _r_exit_eff(self) -> float:
+        """C 形弯触发阈值较深时，退出阈值同步抬高（如 R_c_enter=0.75 -> R_exit=0.82）。"""
+        r_exit = float(self.cfg.R_exit)
+        if self.r_c_enter is not None:
+            r_exit = max(r_exit, float(self.r_c_enter) + 0.08)
+        return r_exit
+
     def step(self, i: int, R: float, valid: bool, c_val: float | None = None) -> None:
         if not getattr(self.cfg, "enabled", True):
             return
@@ -67,16 +78,27 @@ class TurnCounter:
         self.invalid_run = 0
 
         r_enter = float(self.cfg.R_enter)
-        r_exit = float(self.cfg.R_exit)
+        r_exit_eff = self._r_exit_eff()
         c_abs = abs(float(c_val)) if (c_val is not None and np.isfinite(c_val)) else float("inf")
 
+        # EXT -> CURL 触发：深 Ω 弯 (R <= R_enter) 或 标准 C 形弯 (R <= R_c_enter 且 |c| >= c_enter_rad)
+        deep_trigger = r_val <= r_enter
+        c_bend_trigger = bool(
+            self.r_c_enter is not None
+            and self.c_enter_rad is not None
+            and c_val is not None
+            and np.isfinite(c_val)
+            and r_val <= float(self.r_c_enter)
+            and abs(float(c_val)) >= float(self.c_enter_rad)
+        )
+
         if self.state == "INIT":
-            if r_val >= r_exit:
+            if r_val >= r_exit_eff:
                 self.state = "EXT"
             return
 
         if self.state == "EXT":
-            if r_val <= r_enter:
+            if deep_trigger or c_bend_trigger:
                 self.state = "CURL"
                 self.curl_start = int(i)
                 self.peak_c_in_curl = c_abs
@@ -92,7 +114,7 @@ class TurnCounter:
             self._release()
             self.state = "INIT"
             return
-        if r_val >= r_exit:
+        if r_val >= r_exit_eff:
             self._try_count(i)
             self._release()
 

@@ -24,6 +24,7 @@ class Feat:
     c: float  # 总转角 (尾20% - 头20%, rad)
     u: np.ndarray  # (2,) 指向头部的单位体轴向量
     center: np.ndarray  # (2,) 中心线质心坐标
+    tangent_mid: np.ndarray | None = None  # (2,) 中段 25%~75% 指向头部的单位切向量（弧线爬行路径积分用）
 
 
 def compute_features(dense: np.ndarray | None, cfg: KinCfg) -> Feat | None:
@@ -59,6 +60,15 @@ def compute_features(dense: np.ndarray | None, cfg: KinCfg) -> Feat | None:
         u = (mid_vec / max(1e-6, n_mid)).astype(np.float64)
 
     center = pts.mean(axis=0).astype(np.float64)
+
+    # 中段 25%~75% 指向头部的单位切向量：避开头端觅食摆动与尾端卷曲噪声（08_SPEC S4）
+    n_pts = len(pts)
+    i_head = max(0, n_pts // 4)
+    i_tail = min(n_pts - 1, (3 * n_pts) // 4)
+    mid_vec = pts[i_head] - pts[i_tail]
+    mid_norm = float(np.hypot(mid_vec[0], mid_vec[1]))
+    tangent_mid = (mid_vec / mid_norm).astype(np.float64) if mid_norm > 1e-6 else u.astype(np.float64)
+
     return Feat(
         L=L,
         chord=chord,
@@ -70,4 +80,5 @@ def compute_features(dense: np.ndarray | None, cfg: KinCfg) -> Feat | None:
         c=c,
         u=u.astype(np.float32),
         center=center.astype(np.float32),
+        tangent_mid=tangent_mid.astype(np.float32),
     )
