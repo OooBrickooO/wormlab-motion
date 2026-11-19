@@ -38,6 +38,7 @@ from wormlab.config import KinCfg, load_config  # noqa: E402
 from wormlab.kinematics import KinematicsEngine, TrackReport  # noqa: E402
 from wormlab.pipeline.cache import load_cache  # noqa: E402
 from wormlab.pipeline.late_entry import partition_tracks_by_uid, select_primary_uid_per_track_id  # noqa: E402
+from wormlab.pose.orientation import reorient_track_poses, reorient_track_poses_coil_aware  # noqa: E402
 from wormlab.schemas import Pose, Quality  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -107,15 +108,7 @@ def _align_head_flip(poses_seq: list[Pose | None]) -> list[Pose | None]:
     return [
         None
         if p is None or p.dense is None
-        else Pose(
-            dense=p.dense[::-1].copy(),
-            length=p.length,
-            chord=p.chord,
-            width=p.width,
-            area=p.area,
-            quality=p.quality,
-            flags=p.flags,
-        )
+        else replace(p, dense=p.dense[::-1].copy())
         for p in poses_seq
     ]
 
@@ -123,6 +116,7 @@ def _align_head_flip(poses_seq: list[Pose | None]) -> list[Pose | None]:
 def _load_real_tracks(profile: str, videos: list[str], align_head: bool) -> list[_TrackData]:
     """从 data/cache/<vid>/tracks.npz + benchmarks/labels/<vid>.json 构建评测轨迹集。"""
     cfg0 = load_config(profile)
+    coil_aware = bool(getattr(cfg0.pose, "coil_aware_reorient", False) and cfg0.kinematics.s_run.enabled)
     tracks: list[_TrackData] = []
     for vid in videos:
         cdir = RE_ROOT / "data" / "cache" / vid
@@ -158,6 +152,15 @@ def _load_real_tracks(profile: str, videos: list[str], align_head: bool) -> list
                     seq[r.frame_idx] = r.pose
             if align_head:
                 seq = _align_head_flip(seq)
+            if coil_aware:
+                seq = reorient_track_poses_coil_aware(
+                    seq,
+                    cfg=cfg0.kinematics,
+                    fps=fps,
+                    preserve_first_head=align_head,
+                )
+            else:
+                seq = reorient_track_poses(seq)
             tracks.append(_TrackData(video_id=vid, label=str(a["label"]), gt=int(a["gt"]), fps=fps, poses=seq))
     return tracks
 
@@ -321,7 +324,7 @@ def tune_real_crawl(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
     return doc
 
 
-def tune_real_swim(out_yaml: Path, align_head: bool = True) -> dict[str, Any]:
+def tune_real_swim(out_yaml: Path, align_head: bool = False) -> dict[str, Any]:
     """真实游泳视频调参：网格搜索 swing 阈值（骨架迟滞 + 免骨架双轨均由生产引擎统一执行）。"""
     tracks = _load_real_tracks("swim_liquid", REAL_SWIM_VIDEOS, align_head=align_head)
     log.info("已加载 %d 条真实游泳轨迹 (align_head=%s)", len(tracks), align_head)
@@ -421,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path = Path(args.out) if args.out else (RE_ROOT / "benchmarks" / f"tuned_{args.profile}.yaml")
     if args.dataset == "real":
         if args.profile == "swim_liquid":
-            tune_real_swim(out_path, align_head=not args.raw_head)
+            tune_real_swim(out_path, align_head=False)
         else:
             tune_real_crawl(out_path, align_head=not args.raw_head)
     else:

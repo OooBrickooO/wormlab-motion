@@ -40,7 +40,11 @@ def _run_s_counter_on_dense(
     for i, f in enumerate(feats):
         lo, hi = max(0, i - half), min(len(feats), i + half + 1)
         win = feats[lo:hi]
-        g = wave_gate(win, cfg.wave, expected_len=2 * half + 1) if f is not None else wave_gate([], cfg.wave, expected_len=2 * half + 1)
+        g = (
+            wave_gate(win, cfg.wave, expected_len=2 * half + 1, fps=fps)
+            if f is not None
+            else wave_gate([], cfg.wave, expected_len=2 * half + 1, fps=fps)
+        )
         valid_Ls = [x.L for x in feats[max(0, i - int(round(2.0 * fps))) : i + 1] if x is not None]
         L_ref = float(np.median(valid_Ls)) if valid_Ls else 120.0
         phi = modal_phase(f.a1, f.a2) if f is not None else None

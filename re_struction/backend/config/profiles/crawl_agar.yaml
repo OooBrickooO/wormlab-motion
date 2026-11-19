@@ -25,7 +25,7 @@ pose:
   min_len_over_width: 2.2
   mask_refine:
     enabled: true
-    use_bg_sub: true
+    use_bg_sub: false
     prior_dilate_px: 8
     bg_mad_k: 3.5
     bg_min_diff: 8

@@ -94,13 +94,18 @@ def fit_track_eigenworms(
     e1 = vh[0].astype(np.float64)
     e2 = vh[1].astype(np.float64)
 
-    # 用三角基对齐符号与手性（确保头→尾行波 dΦ > 0）
+    # 用三角基对齐符号与手性（确保 2×2 投影矩阵行列式 det > 0，头→尾行波 dΦ > 0）
     m = th.shape[1]
     s_mid = (np.arange(m, dtype=np.float64) + 0.5) / float(m)
     trig_c = np.cos(2.0 * np.pi * float(k_body) * s_mid)
     trig_s = np.sin(2.0 * np.pi * float(k_body) * s_mid)
-    if float(np.dot(e2, trig_s)) < 0.0:
-        e2 = -e2
-    if float(np.dot(e1, trig_c)) < 0.0 and abs(float(np.dot(e1, trig_c))) >= abs(float(np.dot(e1, trig_s))):
+    e1c = float(np.dot(e1, trig_c))
+    e1s = float(np.dot(e1, trig_s))
+    if (e1c if abs(e1c) >= abs(e1s) else e1s) < 0.0:
         e1 = -e1
+        e1c = -e1c
+        e1s = -e1s
+    det = e1c * float(np.dot(e2, trig_s)) - e1s * float(np.dot(e2, trig_c))
+    if det < 0.0:
+        e2 = -e2
     return e1, e2

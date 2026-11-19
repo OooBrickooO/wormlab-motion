@@ -374,7 +374,7 @@ class KinematicsEngine:
             self._compute_feat_at(self._next_feat_idx)
             self._next_feat_idx += 1
 
-        step_lookahead = max(self.h_wave, self.h_speed)
+        step_lookahead = max(self.h_wave, self.h_speed, self._h_c if self._swing_scalar_mode else 0)
         n_feats = len(self.feats)
         while (n_feats - 1) >= (self._next_step_idx + step_lookahead):
             self._step_frame(self._next_step_idx)
@@ -612,32 +612,32 @@ class KinematicsEngine:
         from wormlab.kinematics.swim_shape import count_swim_from_shape
 
         n_skel_ok = 0  # 骨架有效 (dense 非空且非 BAD) 帧数
-        n_bad = 0
-        n_missing = 0
+        n_shape_valid = 0
+        n_skel_bad_in_shape = 0
         lengths: list[float] = []
         for p in poses:
             if p is None:
-                n_missing += 1
                 continue
-            if p.dense is None:
-                n_missing += 1
-                continue
-            if p.quality == Quality.BAD:
-                n_bad += 1
+            has_shape = bool(np.isfinite(p.ell_aspect))
+            if has_shape:
+                n_shape_valid += 1
+            if p.dense is None or p.quality == Quality.BAD:
+                if has_shape:
+                    n_skel_bad_in_shape += 1
             else:
                 n_skel_ok += 1
                 if p.length > 1.0:
                     lengths.append(float(p.length))
 
         med_len = float(np.median(lengths)) if lengths else float("inf")
-        denom = max(1, n_skel_ok + n_bad)
-        bad_ratio = float(n_bad + n_missing) / float(denom)
+        bad_ratio = float(n_skel_bad_in_shape) / float(max(1, n_shape_valid))
 
         shape_cycles, shape_bends, peaks = count_swim_from_shape(poses, fps=fps, cfg=cfg.swing)
 
         skeleton_bends = int(rep.c_bends)
         need_fallback = (
             (np.isfinite(med_len) and med_len < float(cfg.swing.shape_min_len_px))
+            or (n_skel_ok == 0 and n_shape_valid > 0)
             or (bad_ratio > float(cfg.swing.shape_bad_ratio_thresh))
             or (skeleton_bends == 0 and shape_bends >= 2)
         )
@@ -672,12 +672,13 @@ class KinematicsEngine:
 
         mode_counts = Counter(pf.behavior.value for pf in new_pfs)
         mode_time = {b.value: round(float(mode_counts.get(b.value, 0)) / fps, 3) for b in Behavior}
-        obs_sec = float(n_skel_ok) / fps
+        n_obs_eff = max(n_skel_ok, n_shape_valid)
+        obs_sec = float(n_obs_eff) / fps
         freq_c = float(c_tot) / obs_sec if obs_sec > 1e-3 else 0.0
         avg_freq_leg = float(rep.s_count + c_tot) / obs_sec if obs_sec > 1e-3 else 0.0
 
         n_active = sum(1 for pf in new_pfs if pf.behavior in {Behavior.CRAWL, Behavior.THRASH, Behavior.TURN, Behavior.MOVING})
-        act_score = float(n_active) / float(max(1, n_skel_ok)) if n_skel_ok else 0.0
+        act_score = float(n_active) / float(max(1, n_obs_eff)) if n_obs_eff else 0.0
 
         if rep.s_count > 0:
             dom_beh = Behavior.CRAWL
@@ -695,6 +696,7 @@ class KinematicsEngine:
             c_bends=int(c_bnd),
             c_count=int(c_tot),
             mode_time=mode_time,
+            observed_seconds=round(obs_sec, 3),
             freq_c_hz=round(freq_c, 4),
             avg_freq_legacy=round(avg_freq_leg, 4),
             activity_score=round(float(np.clip(act_score, 0.0, 1.0)), 4),

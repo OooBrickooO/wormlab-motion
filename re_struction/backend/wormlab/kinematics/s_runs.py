@@ -157,6 +157,7 @@ class SRunCounter:
             return
 
         dphi = float(wrap_pi(float(phi) - self.phi_prev))
+        bridged_gap = 1
 
         if self.gap > 0:
             # 关键修复 S3: 短间隙 (<= phase_bridge_frames) 恢复时，若方向一致且相位跳变合理，
@@ -166,6 +167,7 @@ class SRunCounter:
                 and abs(dphi) < 0.65 * np.pi
                 and (self.direction == 0 or (self.direction * dphi) > 0.0)
             )
+            bridged_gap = self.gap + 1
             self.gap = 0
             self.phi_prev = float(phi)
             if not can_bridge:
@@ -181,8 +183,9 @@ class SRunCounter:
         # 关键修复 S4: 逐帧切向位移积分（弧线拐弯不再被直线弦压扁；原地抖动正负抵消依然≈0）
         if self.prev_center is not None:
             step_vec = c_arr - self.prev_center
-            # 限制单帧异常跳变（如追踪闪跳 > 0.45 * L_ref），防脏帧注入假位移
-            if float(np.linalg.norm(step_vec)) <= 0.45 * max(20.0, float(L_ref)):
+            # 限制单帧异常跳变（如追踪闪跳 > 0.45 * L_ref；跨隙桥接时按 bridged_gap 适度放宽），防脏帧注入假位移
+            max_step = min(1.5, 0.45 * float(bridged_gap)) * max(20.0, float(L_ref))
+            if float(np.linalg.norm(step_vec)) <= max_step:
                 self.path_disp += float(np.dot(step_vec, t_unit))
         self.prev_center = c_arr.copy()
         self.last_center = c_arr.copy()

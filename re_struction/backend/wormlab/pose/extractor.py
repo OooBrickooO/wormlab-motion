@@ -77,7 +77,9 @@ class PoseExtractor:
         y0c = int(max(0, y0))
         if x1 <= x0c or y1 <= y0c:
             return float("nan")
-        mask_crop = mask[0 : y1 - y0c, 0 : x1 - x0c]
+        sy0 = max(0, y0c - y0)
+        sx0 = max(0, x0c - x0)
+        mask_crop = mask[sy0 : sy0 + (y1 - y0c), sx0 : sx0 + (x1 - x0c)]
         if int(mask_crop.sum()) < 1:
             return float("nan")
         gray_crop = frame_gray[y0c:y1, x0c:x1]
@@ -106,13 +108,17 @@ class PoseExtractor:
             mh, mw = mask.shape[:2]
             gray_crop, ex0, ey0 = self._crop_with_prior(frame_gray, x0, y0, mh, mw)
             bg_crop, _, _ = self._crop_with_prior(bg_gray, x0, y0, mh, mw)
-            prev_crop, _, _ = self._crop_with_prior(prev_frame_gray, x0, y0, mh, mw)
 
             if gray_crop is not None:
                 # 将原掩码嵌入外扩画布（掩码原点同步平移到 (ex0, ey0)，08_SPEC Workstream A）
-                canvas = np.zeros(gray_crop.shape[:2], dtype=bool)
+                ch, cw = gray_crop.shape[:2]
+                canvas = np.zeros((ch, cw), dtype=bool)
                 oy0, ox0 = y0 - ey0, x0 - ex0
-                canvas[oy0 : oy0 + mh, ox0 : ox0 + mw] = mask
+                dy0, dx0 = max(0, oy0), max(0, ox0)
+                dy1, dx1 = min(ch, oy0 + mh), min(cw, ox0 + mw)
+                if dy1 > dy0 and dx1 > dx0:
+                    sy0, sx0 = dy0 - oy0, dx0 - ox0
+                    canvas[dy0:dy1, dx0:dx1] = mask[sy0 : sy0 + (dy1 - dy0), sx0 : sx0 + (dx1 - dx0)]
                 mask = refine_mask(gray_crop, canvas, self.cfg, bg_crop=bg_crop)
                 origin_xy = (ex0, ey0)
 
